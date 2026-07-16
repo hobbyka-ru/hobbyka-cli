@@ -1,0 +1,11 @@
+{
+  "name": "hobbyka-cli-repository",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "scripts": {
+    "validate": "node scripts/validate.mjs",
+    "test": "node --test tests/*.test.mjs",
+    "check": "npm run validate && npm test"
+  }
+}

@@ -1,0 +1,28 @@
+{
+  "name": "hobbyka-cli",
+  "version": "0.1.0",
+  "description": "Official Hobbyka catalog and commercial-offer CLI for AI agents.",
+  "author": {
+    "name": "Hobbyka",
+    "url": "https://hobbyka.ru"
+  },
+  "homepage": "https://github.com/mmasterkov/hobbyka-cli/tree/main/plugins/hobbyka-cli",
+  "repository": "https://github.com/mmasterkov/hobbyka-cli",
+  "license": "MIT",
+  "keywords": ["hobbyka", "catalog", "commercial-offer", "cli", "ai-agent"],
+  "skills": "./skills/",
+  "interface": {
+    "displayName": "Hobbyka CLI",
+    "shortDescription": "Подбор товаров и КП Hobbyka через CLI",
+    "longDescription": "Официальный CLI-интерфейс Hobbyka для поиска и уточнения товаров, безопасной регистрации контакта и подготовки коммерческого предложения по серверным ценам.",
+    "developerName": "Hobbyka",
+    "category": "Productivity",
+    "websiteURL": "https://hobbyka.ru/ai/",
+    "capabilities": ["Catalog search", "Product details", "Commercial offers"],
+    "defaultPrompt": [
+      "Подбери скамейки Hobbyka для парка.",
+      "Уточни варианты товара Hobbyka.",
+      "Подготовь КП Hobbyka по выбранным товарам."
+    ]
+  }
+}

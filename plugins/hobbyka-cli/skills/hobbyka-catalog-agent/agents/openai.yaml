@@ -1,0 +1,4 @@
+interface:
+  display_name: "Hobbyka Catalog"
+  short_description: "Подбор товаров и КП Hobbyka через CLI"
+  default_prompt: "Используй $hobbyka-catalog-agent, чтобы подобрать товары Hobbyka и подготовить КП."
