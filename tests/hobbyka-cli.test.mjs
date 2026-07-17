@@ -19,6 +19,13 @@ const run = (args, { env, input = '' } = {}) => new Promise((resolve, reject) =>
   child.stdin.end(input)
 })
 
+test('Hobbyka CLI по умолчанию использует публичную среду new.hobbyka.ru', async () => {
+  const directory = await mkdtemp(path.join(tmpdir(), 'hobbyka-cli-config-'))
+  const result = await run(['config'], { env: { HOBBYKA_STATE_FILE: path.join(directory, 'state.json') } })
+  assert.equal(result.code, 0)
+  assert.equal(JSON.parse(result.stdout).base_url, 'https://new.hobbyka.ru')
+})
+
 test('Hobbyka CLI проходит контактный шлюз и создаёт КП без утечки контакта', async (t) => {
   const requests = []
   const server = createServer(async (request, response) => {

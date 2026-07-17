@@ -14,10 +14,14 @@ const entry = marketplace.plugins[0]
 if (entry.name !== 'hobbyka-cli' || entry.source?.path !== './plugins/hobbyka-cli') throw new Error('Некорректная запись плагина')
 if (entry.policy?.installation !== 'AVAILABLE' || entry.policy?.authentication !== 'ON_INSTALL') throw new Error('Некорректная политика установки')
 if (manifest.name !== 'hobbyka-cli' || !/^\d+\.\d+\.\d+$/.test(manifest.version) || manifest.author?.name !== 'Hobbyka') throw new Error('Некорректный plugin.json')
+if (manifest.interface?.websiteURL !== 'https://new.hobbyka.ru/ai/' || !manifest.description?.includes('Hobbyka')) throw new Error('Некорректные публичные метаданные плагина')
 if (sidecar.schema_version !== 1 || sidecar.agent?.entry_skill !== 'hobbyka-catalog-agent') throw new Error('Некорректный sidecar')
 
 const skill = await readFile(path.join(pluginRoot, 'skills/hobbyka-catalog-agent/SKILL.md'), 'utf8')
-if (!skill.startsWith('---\nname: hobbyka-catalog-agent\n') || !/не обращаться к API или MCP напрямую/i.test(skill)) throw new Error('Некорректный скилл')
+if (!skill.startsWith('---\nname: hobbyka-catalog-agent\n') || !/не обращаться к Hobbyka API, MCP, глобальному поиску или HTML-каталогу напрямую/i.test(skill)) throw new Error('Некорректный скилл')
+
+const cli = await readFile(path.join(pluginRoot, 'skills/hobbyka-catalog-agent/scripts/hobbyka-cli.mjs'), 'utf8')
+if (!cli.includes("const DEFAULT_BASE_URL = 'https://new.hobbyka.ru'")) throw new Error('Некорректная публичная среда CLI')
 
 const visit = async (directory) => {
   for (const item of await readdir(directory, { withFileTypes: true })) {
