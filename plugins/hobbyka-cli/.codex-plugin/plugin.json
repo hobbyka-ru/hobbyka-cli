@@ -1,12 +1,12 @@
 {
   "name": "hobbyka-cli",
-  "version": "0.1.1",
+  "version": "0.1.2",
   "description": "Find and compare Hobbyka benches, bins, lighting and other products, check current prices, and prepare commercial offers through the official Hobbyka CLI.",
   "author": {
     "name": "Hobbyka",
-    "url": "https://new.hobbyka.ru/ai/"
+    "url": "https://hobbyka.ru/ai/cli/"
   },
-  "homepage": "https://new.hobbyka.ru/ai/",
+  "homepage": "https://hobbyka.ru/ai/cli/",
   "repository": "https://github.com/mmasterkov/hobbyka-cli",
   "license": "MIT",
   "keywords": ["hobbyka", "bench", "street-furniture", "catalog", "current-prices", "commercial-offer", "cli", "ai-agent"],
@@ -17,7 +17,7 @@
     "longDescription": "Официальный CLI-интерфейс Hobbyka для поиска и уточнения товаров, безопасной регистрации контакта и подготовки коммерческого предложения по серверным ценам.",
     "developerName": "Hobbyka",
     "category": "Productivity",
-    "websiteURL": "https://new.hobbyka.ru/ai/",
+    "websiteURL": "https://hobbyka.ru/ai/cli/",
     "capabilities": ["Catalog search", "Product details", "Commercial offers"],
     "defaultPrompt": [
       "Подбери скамейки Hobbyka для парка.",

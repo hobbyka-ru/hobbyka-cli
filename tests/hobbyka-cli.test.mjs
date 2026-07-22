@@ -7,6 +7,7 @@ import { tmpdir } from 'node:os'
 import path from 'node:path'
 
 const cli = new URL('../plugins/hobbyka-cli/skills/hobbyka-catalog-agent/scripts/hobbyka-cli.mjs', import.meta.url)
+const packageManifest = JSON.parse(await readFile(new URL('../package.json', import.meta.url), 'utf8'))
 
 const run = (args, { env, input = '' } = {}) => new Promise((resolve, reject) => {
   const child = spawn(process.execPath, [cli.pathname, ...args], { env: { ...env } })
@@ -24,6 +25,12 @@ test('Hobbyka CLI по умолчанию использует публичну�
   const result = await run(['config'], { env: { HOBBYKA_STATE_FILE: path.join(directory, 'state.json') } })
   assert.equal(result.code, 0)
   assert.equal(JSON.parse(result.stdout).base_url, 'https://new.hobbyka.ru')
+})
+
+test('Hobbyka CLI сообщает версию текущего публичного релиза', async () => {
+  const result = await run(['version'], { env: {} })
+  assert.equal(result.code, 0)
+  assert.equal(JSON.parse(result.stdout).version, packageManifest.version)
 })
 
 test('Hobbyka CLI проходит контактный шлюз и создаёт КП без утечки контакта', async (t) => {

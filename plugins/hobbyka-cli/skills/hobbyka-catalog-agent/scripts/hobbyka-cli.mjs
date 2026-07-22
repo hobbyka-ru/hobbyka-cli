@@ -6,7 +6,7 @@ import { homedir } from 'node:os'
 import path from 'node:path'
 import process from 'node:process'
 
-const VERSION = '0.1.1'
+const VERSION = '0.1.2'
 const DEFAULT_BASE_URL = 'https://new.hobbyka.ru'
 const DEFAULT_TIMEOUT_MS = 30_000
 
