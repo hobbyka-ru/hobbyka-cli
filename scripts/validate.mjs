@@ -21,9 +21,11 @@ if (sidecar.schema_version !== 1 || sidecar.agent?.entry_skill !== 'hobbyka-cata
 
 const skill = await readFile(path.join(pluginRoot, 'skills/hobbyka-catalog-agent/SKILL.md'), 'utf8')
 if (!skill.startsWith('---\nname: hobbyka-catalog-agent\n') || !/не обращаться к Hobbyka API, MCP, глобальному поиску или HTML-каталогу напрямую/i.test(skill)) throw new Error('Некорректный скилл')
+if (!skill.includes('Пустой или слишком узкий первый поиск не является поводом начинать вход') || !skill.includes('встроенном браузере Codex') || !skill.includes('если данные совпали')) throw new Error('Не описан полный сценарий партнёрской авторизации')
+if (!skill.includes('Для того чтобы увидеть партнерские цены и получить доступ к созданию КП необходимо авторизоваться, хотите это сделать?') || !skill.includes('Не сокращать, не перефразировать')) throw new Error('Не зафиксирован призыв к партнёрской авторизации')
 
 const cli = await readFile(path.join(pluginRoot, 'skills/hobbyka-catalog-agent/scripts/hobbyka-cli.mjs'), 'utf8')
-if (!cli.includes("const DEFAULT_BASE_URL = 'https://new.hobbyka.ru'")) throw new Error('Некорректная публичная среда CLI')
+if (!cli.includes("const DEFAULT_BASE_URL = 'https://hobbyka.ru'")) throw new Error('Некорректная публичная среда CLI')
 if (!cli.includes(`const VERSION = '${expectedVersion}'`)) throw new Error('Версия CLI не совпадает с версией плагина')
 
 const visit = async (directory) => {

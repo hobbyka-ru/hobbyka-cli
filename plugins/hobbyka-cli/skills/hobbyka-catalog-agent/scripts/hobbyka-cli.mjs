@@ -6,9 +6,11 @@ import { homedir } from 'node:os'
 import path from 'node:path'
 import process from 'node:process'
 
-const VERSION = '0.1.2'
-const DEFAULT_BASE_URL = 'https://new.hobbyka.ru'
+const VERSION = '0.4.0'
+const DEFAULT_BASE_URL = 'https://hobbyka.ru'
 const DEFAULT_TIMEOUT_MS = 30_000
+const AUTHORIZATION_PROMPT = 'Для того чтобы увидеть партнерские цены и получить доступ к созданию КП необходимо авторизоваться, хотите это сделать?'
+const CONTACT_EXPLANATION = 'Сохранить контакт — записать имя, телефон или email и интерес клиента. Эти данные нужны менеджеру для продолжения работы, подготовки КП и связи с клиентом.'
 
 class CliError extends Error {
   constructor(code, message, exitCode = 1, details = undefined) {
@@ -116,7 +118,7 @@ const writeState = async (state) => {
   }
 }
 
-const profileFor = (state, baseUrl) => state.profiles[baseUrl] || { first_request_completed: false }
+const profileFor = (state, baseUrl) => state.profiles[baseUrl] || { first_request_completed: false, mode: 'public' }
 
 const contactStatus = (profile) => ({
   registered: Boolean(profile.access_token),
@@ -125,18 +127,50 @@ const contactStatus = (profile) => ({
   email_present: Boolean(profile.email_present)
 })
 
+const authenticatedMode = (profile) => ['partner', 'admin'].includes(profile.mode) && Boolean(profile.access_token)
+
+const accessStatus = (profile) => ({
+  mode: authenticatedMode(profile) ? profile.mode : 'public',
+  authenticated: authenticatedMode(profile),
+  roles: Array.isArray(profile.roles) ? profile.roles : [],
+  capabilities: profile.capabilities && typeof profile.capabilities === 'object' ? profile.capabilities : {},
+  profile_verified_at: profile.partner_verified_at || null
+})
+
+const partnerStatus = (profile) => ({
+  connected: authenticatedMode(profile),
+  mode: accessStatus(profile).mode,
+  profile_verified_at: profile.partner_verified_at || null
+})
+
 const requireContact = (profile) => {
   if (profile.first_request_completed && !profile.access_token) {
     throw new CliError(
       'contact_required',
-      'Первый запрос уже выполнен. Для продолжения зарегистрируйте компанию и телефон либо email.',
+      'Для защищённой операции авторизуйтесь через аккаунт Hobbyka или сохраните контакт.',
       3,
-      { next_command: 'node scripts/hobbyka-cli.mjs contacts set --stdin' }
+      {
+        partner_login: {
+          eligibility: 'existing_site_account',
+          next_command: 'node scripts/hobbyka-cli.mjs auth login'
+        },
+        contact_registration: {
+          eligibility: 'no_site_account',
+          next_command: 'node scripts/hobbyka-cli.mjs contacts set --stdin',
+          explanation: CONTACT_EXPLANATION
+        }
+      }
     )
   }
 }
 
-const readStdinJson = async () => {
+const requireAdmin = (profile) => {
+  if (accessStatus(profile).mode !== 'admin') {
+    throw new CliError('admin_required', 'Команда доступна менеджерам и администраторам Hobbyka после auth login.', 4)
+  }
+}
+
+const readStdinJson = async (code = 'invalid_json', message = 'Ожидается JSON-объект в стандартном вводе.') => {
   const chunks = []
   for await (const chunk of process.stdin) chunks.push(chunk)
   const raw = Buffer.concat(chunks).toString('utf8')
@@ -145,7 +179,7 @@ const readStdinJson = async () => {
     if (!value || Array.isArray(value) || typeof value !== 'object') throw new Error('object required')
     return value
   } catch {
-    throw new CliError('invalid_contact_json', 'Ожидается JSON-объект контакта в стандартном вводе.', 2)
+    throw new CliError(code, message, 2)
   }
 }
 
@@ -193,21 +227,46 @@ const request = async (baseUrl, route, { method = 'GET', body, token, idempotenc
   }
 }
 
-const completeFirstRequest = async (state, baseUrl, profile, result) => {
+const authorizationGate = () => ({
+  status: 'required',
+  message: AUTHORIZATION_PROMPT,
+  partner_login: {
+    eligibility: 'existing_site_account',
+    next_command: 'node scripts/hobbyka-cli.mjs auth login'
+  },
+  contact_registration: {
+    eligibility: 'no_site_account',
+    next_command: 'node scripts/hobbyka-cli.mjs contacts set --stdin',
+    explanation: CONTACT_EXPLANATION
+  }
+})
+
+const completeFirstRequest = async (state, baseUrl, profile, result, repeatRequest, hasResult = true) => {
+  if (!hasResult && !profile.access_token) return result
   if (!profile.first_request_completed && !profile.access_token) {
-    const updated = { ...profile, first_request_completed: true, updated_at: new Date().toISOString() }
+    const updated = { ...profile, mode: 'public', first_request_completed: true, pending_repeat: repeatRequest, updated_at: new Date().toISOString() }
     state.profiles[baseUrl] = updated
     await writeState(state)
-    return {
-      ...result,
-      contact_gate: {
-        status: 'required',
-        message: 'Для следующего рабочего запроса зарегистрируйте компанию и телефон либо email.',
-        next_command: 'node scripts/hobbyka-cli.mjs contacts set --stdin'
-      }
-    }
+    return { ...result, contact_gate: authorizationGate() }
   }
-  return { ...result, contact_gate: { status: profile.access_token ? 'registered' : 'open' } }
+  if (!profile.access_token) {
+    const updated = { ...profile, pending_repeat: repeatRequest, updated_at: new Date().toISOString() }
+    state.profiles[baseUrl] = updated
+    await writeState(state)
+    return { ...result, contact_gate: authorizationGate() }
+  }
+  return { ...result, access: accessStatus(profile), contact_gate: { status: authenticatedMode(profile) ? profile.mode : 'registered' } }
+}
+
+const serverProfile = (payload) => payload?.data || payload
+
+const normalizedServerMode = (profile) => profile?.mode === 'admin' ? 'admin' : 'partner'
+
+const replayPendingRequest = async (baseUrl, profile) => {
+  const pending = profile.pending_repeat
+  if (!pending || !['search', 'product'].includes(pending.command) || typeof pending.route !== 'string' || !pending.route.startsWith('/api/ai/v1/catalog/')) return null
+  const data = await request(baseUrl, pending.route, { token: profile.access_token })
+  return { command: pending.command, data }
 }
 
 const buildQuery = (entries) => {
@@ -229,6 +288,12 @@ const parseItems = (value) => {
   return items
 }
 
+const publicIdentifier = (value, name) => {
+  const result = scalar(value, name, { required: true, max: 64 })
+  if (!/^[a-f0-9]{32,64}$/.test(result)) throw new CliError('invalid_public_id', `Некорректный ${name}.`, 2)
+  return result
+}
+
 const help = () => ({
   ok: true,
   version: VERSION,
@@ -238,8 +303,25 @@ const help = () => ({
     'contacts set --stdin',
     'contacts status',
     'contacts clear',
+    'auth login',
+    'auth complete',
+    'auth status',
+    'auth logout',
+    'partner <login|complete|status|logout> (совместимый псевдоним auth)',
     'offer create --items <product_id:quantity,...>',
     'offer status --public-id <id>',
+    'offer list',
+    'offer revise --public-id <id> --expected-version <n> --items <product_id:quantity,...>',
+    'offer archive --public-id <id> --expected-version <n>',
+    'order create (--items <product_id:quantity,...> | --offer-public-id <id>)',
+    'order list',
+    'order get --public-id <id>',
+    'order update --public-id <id> --expected-version <n> [--comments <text>]',
+    'order cancel --public-id <id> --expected-version <n> [--reason <text>]',
+    'admin offers list [--number <number>] [--manager-id <id>] [--date-from YYYY-MM-DD] [--date-to YYYY-MM-DD] [--active Y|N] [--page 1] [--limit 50]',
+    'admin offers get --id <id>',
+    'admin orders list [--id <id>] [--user-id <id>] [--status <code>] [--date-from YYYY-MM-DD] [--date-to YYYY-MM-DD] [--page 1] [--limit 50]',
+    'admin orders get --id <id>',
     'config'
   ]
 })
@@ -261,8 +343,91 @@ const main = async () => {
       command,
       base_url: baseUrl,
       state_file: stateFile(),
-      contact: contactStatus(profile)
+      contact: contactStatus(profile),
+      access: accessStatus(profile),
+      partner: partnerStatus(profile)
     }
+  }
+
+  const authCommand = command === 'auth' || command === 'partner'
+
+  if (authCommand && action === 'login') {
+    if (authenticatedMode(profile)) {
+      const verified = await request(baseUrl, '/api/partner/v1/profile/', { token: profile.access_token })
+      const verifiedProfile = serverProfile(verified)
+      return {
+        ok: true, command: `${command} login`,
+        status: 'already_authorized',
+        access: { ...accessStatus(profile), mode: normalizedServerMode(verifiedProfile) },
+        profile: verifiedProfile
+      }
+    }
+    const authorization = await request(baseUrl, '/api/partner/v1/auth/device/', {
+      method: 'POST', body: { client_name: 'Hobbyka CLI' }
+    })
+    const data = authorization?.data || authorization
+    const deviceCode = scalar(data?.device_code, 'device_code', { required: true, max: 128 })
+    state.profiles[baseUrl] = {
+      ...profile,
+      mode: 'public',
+      pending_device_code: deviceCode,
+      pending_user_code: scalar(data?.user_code, 'user_code', { required: true, max: 16 }),
+      pending_expires_at: new Date(Date.now() + integer(data?.expires_in, 'expires_in', { min: 60, max: 3600 }) * 1000).toISOString(),
+      updated_at: new Date().toISOString()
+    }
+    await writeState(state)
+    return {
+      ok: true, command: `${command} login`, status: 'site_authorization_required',
+      user_code: state.profiles[baseUrl].pending_user_code,
+      verification_uri: data?.verification_uri,
+      verification_uri_complete: data?.verification_uri_complete,
+      expires_at: state.profiles[baseUrl].pending_expires_at,
+      next_command: 'node scripts/hobbyka-cli.mjs auth complete'
+    }
+  }
+
+  if (authCommand && action === 'complete') {
+    const deviceCode = scalar(profile.pending_device_code, 'pending_device_code', { required: true, max: 128 })
+    const authorization = await request(baseUrl, '/api/partner/v1/auth/token/', { method: 'POST', body: { device_code: deviceCode } })
+    const data = authorization?.data || authorization
+    if (data?.status === 'authorization_pending') {
+      return { ok: true, command: `${command} complete`, status: 'authorization_pending', user_code: profile.pending_user_code, verification_uri_complete: `${baseUrl}/personal/partner-cli/?code=${encodeURIComponent(profile.pending_user_code)}` }
+    }
+    const token = scalar(data?.access_token, 'access_token', { required: true, max: 512 })
+    state.profiles[baseUrl] = {
+      ...profile, first_request_completed: true, mode: data?.mode === 'admin' ? 'admin' : 'partner', access_token: token,
+      expires_at: data?.expires_at || null, partner_verified_at: null, updated_at: new Date().toISOString()
+    }
+    await writeState(state)
+    const verified = await request(baseUrl, '/api/partner/v1/profile/', { token })
+    const verifiedProfile = serverProfile(verified)
+    state.profiles[baseUrl].mode = normalizedServerMode(verifiedProfile)
+    state.profiles[baseUrl].roles = Array.isArray(verifiedProfile?.roles) ? verifiedProfile.roles : []
+    state.profiles[baseUrl].scopes = Array.isArray(verifiedProfile?.scopes) ? verifiedProfile.scopes : []
+    state.profiles[baseUrl].capabilities = verifiedProfile?.capabilities && typeof verifiedProfile.capabilities === 'object' ? verifiedProfile.capabilities : {}
+    state.profiles[baseUrl].partner_verified_at = new Date().toISOString()
+    state.profiles[baseUrl].updated_at = new Date().toISOString()
+    const replayedRequest = await replayPendingRequest(baseUrl, state.profiles[baseUrl])
+    delete state.profiles[baseUrl].pending_device_code
+    delete state.profiles[baseUrl].pending_user_code
+    delete state.profiles[baseUrl].pending_expires_at
+    delete state.profiles[baseUrl].pending_repeat
+    await writeState(state)
+    return { ok: true, command: `${command} complete`, status: 'authorized', access: accessStatus(state.profiles[baseUrl]), profile: verifiedProfile, replayed_request: replayedRequest }
+  }
+
+  if (authCommand && action === 'status') {
+    if (!authenticatedMode(profile)) return { ok: true, command: `${command} status`, access: accessStatus(profile) }
+    const verified = await request(baseUrl, '/api/partner/v1/profile/', { token: profile.access_token })
+    const verifiedProfile = serverProfile(verified)
+    return { ok: true, command: `${command} status`, access: { ...accessStatus(profile), mode: normalizedServerMode(verifiedProfile) }, profile: verifiedProfile }
+  }
+
+  if (authCommand && action === 'logout') {
+    if (authenticatedMode(profile)) await request(baseUrl, '/api/partner/v1/auth/logout/', { method: 'POST', body: {}, token: profile.access_token })
+    state.profiles[baseUrl] = { first_request_completed: false, mode: 'public', updated_at: new Date().toISOString() }
+    await writeState(state)
+    return { ok: true, command: `${command} logout`, access: accessStatus(state.profiles[baseUrl]), partner: partnerStatus(state.profiles[baseUrl]) }
   }
 
   if (command === 'contacts' && action === 'status') {
@@ -277,20 +442,21 @@ const main = async () => {
 
   if (command === 'contacts' && action === 'set') {
     if (!flags.stdin) throw new CliError('stdin_required', 'Передайте контакт как JSON через стандартный ввод и флаг --stdin.', 2)
-    const contact = await readStdinJson()
+    const contact = await readStdinJson('invalid_contact_json', 'Ожидается JSON-объект контакта в стандартном вводе.')
     const company = scalar(contact.company, 'company', { required: true, max: 255 })
     const name = scalar(contact.name, 'name', { max: 255 })
     const phone = scalar(contact.phone, 'phone', { max: 64 })
     const email = scalar(contact.email, 'email', { max: 254 })
     if (!phone && !email) throw new CliError('contact_required', 'Укажите телефон либо email.', 2)
     if (email && !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) throw new CliError('invalid_email', 'Некорректный email.', 2)
-    const registered = await request(baseUrl, '/api/ai/v1/cli/contacts', {
+    const registered = await request(baseUrl, '/api/ai/v1/cli/contacts/', {
       method: 'POST',
       body: { company, name: name || undefined, phone: phone || undefined, email: email || undefined, agent: 'hobbyka-cli' }
     })
     const accessToken = scalar(registered?.data?.access_token ?? registered?.access_token, 'access_token', { required: true, max: 512 })
     state.profiles[baseUrl] = {
       first_request_completed: true,
+      mode: 'public',
       access_token: accessToken,
       expires_at: registered?.data?.expires_at ?? registered?.expires_at ?? null,
       company_present: true,
@@ -303,23 +469,24 @@ const main = async () => {
   }
 
   if (command === 'search') {
-    requireContact(profile)
     const query = scalar(flags.query ?? flags.q, 'query', { max: 500 })
     const limit = integer(flags.limit, 'limit', { min: 1, max: 100, fallback: 10 })
     const sectionId = flags['section-id'] === undefined ? undefined : integer(flags['section-id'], 'section-id')
-    const route = `/api/ai/v1/catalog/products?${buildQuery([
+    const route = `/api/ai/v1/catalog/products/?${buildQuery([
       ['q', query], ['section_id', sectionId], ['section_code', scalar(flags['section-code'], 'section-code', { max: 128 })],
       ['limit', limit], ['cursor', scalar(flags.cursor, 'cursor', { max: 2048 })], ['agent', 'hobbyka-cli']
     ])}`
     const data = await request(baseUrl, route, { token: profile.access_token })
-    return completeFirstRequest(state, baseUrl, profile, { ok: true, command, data, recommendation: recommendation(flags) })
+    const items = data?.data?.items ?? data?.items
+    const hasResult = !Array.isArray(items) || items.length > 0
+    return completeFirstRequest(state, baseUrl, profile, { ok: true, command, data, recommendation: recommendation(flags) }, { command, route }, hasResult)
   }
 
   if (command === 'product') {
-    requireContact(profile)
     const id = integer(flags.id, 'id')
-    const data = await request(baseUrl, `/api/ai/v1/catalog/products/${id}?agent=hobbyka-cli`, { token: profile.access_token })
-    return completeFirstRequest(state, baseUrl, profile, { ok: true, command, data, recommendation: recommendation(flags) })
+    const route = `/api/ai/v1/catalog/products/${id}/?agent=hobbyka-cli`
+    const data = await request(baseUrl, route, { token: profile.access_token })
+    return completeFirstRequest(state, baseUrl, profile, { ok: true, command, data, recommendation: recommendation(flags) }, { command, route })
   }
 
   if (command === 'offer' && action === 'create') {
@@ -334,21 +501,128 @@ const main = async () => {
     }
     const objectValues = Object.fromEntries(Object.entries(object).filter(([, value]) => value !== ''))
     if (Object.keys(objectValues).length) body.object = objectValues
-    const data = await request(baseUrl, '/api/ai/v1/commercial-offers', {
+    const partnerMode = authenticatedMode(profile)
+    const data = await request(baseUrl, partnerMode ? '/api/partner/v1/commercial-offers/' : '/api/ai/v1/commercial-offers/', {
       method: 'POST',
       body,
       token: profile.access_token,
       idempotencyKey: scalar(flags['idempotency-key'], 'idempotency-key', { max: 128 }) || randomUUID()
     })
-    return { ok: true, command: 'offer create', data, recommendation: recommendation(flags), contact_gate: { status: 'registered' } }
+    return { ok: true, command: 'offer create', data, recommendation: recommendation(flags), contact_gate: { status: partnerMode ? 'partner' : 'registered' } }
   }
 
   if (command === 'offer' && action === 'status') {
     requireContact(profile)
     const publicId = scalar(flags['public-id'], 'public-id', { required: true, max: 64 })
     if (!/^[a-f0-9]{32,64}$/.test(publicId)) throw new CliError('invalid_public_id', 'Некорректный public-id КП.', 2)
-    const data = await request(baseUrl, `/api/ai/v1/commercial-offers/${publicId}?agent=hobbyka-cli`, { token: profile.access_token })
+    const data = await request(baseUrl, `/api/ai/v1/commercial-offers/${publicId}/?agent=hobbyka-cli`, { token: profile.access_token })
     return { ok: true, command: 'offer status', data, contact_gate: { status: 'registered' } }
+  }
+
+  if (command === 'offer' && action === 'list') {
+    if (!authenticatedMode(profile)) throw new CliError('authorization_required', 'Войдите через сайт командой auth login.', 3)
+    const limit = integer(flags.limit, 'limit', { min: 1, max: 100, fallback: 50 })
+    const data = await request(baseUrl, `/api/partner/v1/commercial-offers/?limit=${limit}`, { token: profile.access_token })
+    return { ok: true, command: 'offer list', data }
+  }
+
+  if (command === 'offer' && action === 'revise') {
+    if (!authenticatedMode(profile)) throw new CliError('authorization_required', 'Войдите через сайт командой auth login.', 3)
+    const publicId = publicIdentifier(flags['public-id'], 'public-id')
+    const body = { expected_version: integer(flags['expected-version'], 'expected-version'), items: parseItems(flags.items), agent: 'hobbyka-cli' }
+    const data = await request(baseUrl, `/api/partner/v1/commercial-offers/${publicId}/`, {
+      method: 'PATCH', body, token: profile.access_token,
+      idempotencyKey: scalar(flags['idempotency-key'], 'idempotency-key', { max: 128 }) || randomUUID()
+    })
+    return { ok: true, command: 'offer revise', data }
+  }
+
+  if (command === 'offer' && action === 'archive') {
+    if (!authenticatedMode(profile)) throw new CliError('authorization_required', 'Войдите через сайт командой auth login.', 3)
+    const publicId = publicIdentifier(flags['public-id'], 'public-id')
+    const data = await request(baseUrl, `/api/partner/v1/commercial-offers/${publicId}/archive/`, {
+      method: 'POST', body: { expected_version: integer(flags['expected-version'], 'expected-version') }, token: profile.access_token
+    })
+    return { ok: true, command: 'offer archive', data }
+  }
+
+  if (command === 'order') {
+    if (!authenticatedMode(profile)) throw new CliError('authorization_required', 'Войдите через сайт командой auth login.', 3)
+    if (action === 'list') {
+      const limit = integer(flags.limit, 'limit', { min: 1, max: 100, fallback: 50 })
+      const data = await request(baseUrl, `/api/partner/v1/orders/?limit=${limit}`, { token: profile.access_token })
+      return { ok: true, command: 'order list', data }
+    }
+    if (action === 'get') {
+      const publicId = publicIdentifier(flags['public-id'], 'public-id')
+      const data = await request(baseUrl, `/api/partner/v1/orders/${publicId}/`, { token: profile.access_token })
+      return { ok: true, command: 'order get', data }
+    }
+    if (action === 'create') {
+      const body = { comments: scalar(flags.comments, 'comments', { max: 1000 }) || undefined }
+      if (flags.items) body.items = parseItems(flags.items)
+      if (flags['offer-public-id']) body.offer_public_id = publicIdentifier(flags['offer-public-id'], 'offer-public-id')
+      if (!body.items && !body.offer_public_id) throw new CliError('invalid_argument', 'Укажите --items либо --offer-public-id.', 2)
+      const data = await request(baseUrl, '/api/partner/v1/orders/', {
+        method: 'POST', body, token: profile.access_token,
+        idempotencyKey: scalar(flags['idempotency-key'], 'idempotency-key', { max: 128 }) || randomUUID()
+      })
+      return { ok: true, command: 'order create', data }
+    }
+    if (action === 'update') {
+      const publicId = publicIdentifier(flags['public-id'], 'public-id')
+      const body = { expected_version: integer(flags['expected-version'], 'expected-version'), comments: scalar(flags.comments, 'comments', { max: 1000 }) }
+      const data = await request(baseUrl, `/api/partner/v1/orders/${publicId}/`, { method: 'PATCH', body, token: profile.access_token })
+      return { ok: true, command: 'order update', data }
+    }
+    if (action === 'cancel') {
+      const publicId = publicIdentifier(flags['public-id'], 'public-id')
+      const body = { expected_version: integer(flags['expected-version'], 'expected-version'), reason: scalar(flags.reason, 'reason', { max: 500 }) }
+      const data = await request(baseUrl, `/api/partner/v1/orders/${publicId}/cancel/`, { method: 'POST', body, token: profile.access_token })
+      return { ok: true, command: 'order cancel', data }
+    }
+  }
+
+  if (command === 'admin') {
+    requireAdmin(profile)
+    const resource = action
+    const operation = positionals[2]
+    if (resource === 'offers' && operation === 'list') {
+      const route = `/api/internal/v1/commercial-offers/?${buildQuery([
+        ['number', scalar(flags.number, 'number', { max: 64 })],
+        ['manager_id', flags['manager-id'] === undefined ? undefined : integer(flags['manager-id'], 'manager-id')],
+        ['date_from', scalar(flags['date-from'], 'date-from', { max: 10 })],
+        ['date_to', scalar(flags['date-to'], 'date-to', { max: 10 })],
+        ['active', scalar(flags.active, 'active', { max: 1 })],
+        ['page', integer(flags.page, 'page', { min: 1, max: 1000000, fallback: 1 })],
+        ['limit', integer(flags.limit, 'limit', { min: 1, max: 100, fallback: 50 })]
+      ])}`
+      const data = await request(baseUrl, route, { token: profile.access_token })
+      return { ok: true, command: 'admin offers list', access: accessStatus(profile), data }
+    }
+    if (resource === 'offers' && operation === 'get') {
+      const id = integer(flags.id, 'id')
+      const data = await request(baseUrl, `/api/internal/v1/commercial-offers/${id}/`, { token: profile.access_token })
+      return { ok: true, command: 'admin offers get', access: accessStatus(profile), data }
+    }
+    if (resource === 'orders' && operation === 'list') {
+      const route = `/api/internal/v1/orders/?${buildQuery([
+        ['id', flags.id === undefined ? undefined : integer(flags.id, 'id')],
+        ['user_id', flags['user-id'] === undefined ? undefined : integer(flags['user-id'], 'user-id')],
+        ['status', scalar(flags.status, 'status', { max: 32 })],
+        ['date_from', scalar(flags['date-from'], 'date-from', { max: 10 })],
+        ['date_to', scalar(flags['date-to'], 'date-to', { max: 10 })],
+        ['page', integer(flags.page, 'page', { min: 1, max: 1000000, fallback: 1 })],
+        ['limit', integer(flags.limit, 'limit', { min: 1, max: 100, fallback: 50 })]
+      ])}`
+      const data = await request(baseUrl, route, { token: profile.access_token })
+      return { ok: true, command: 'admin orders list', access: accessStatus(profile), data }
+    }
+    if (resource === 'orders' && operation === 'get') {
+      const id = integer(flags.id, 'id')
+      const data = await request(baseUrl, `/api/internal/v1/orders/${id}/`, { token: profile.access_token })
+      return { ok: true, command: 'admin orders get', access: accessStatus(profile), data }
+    }
   }
 
   throw new CliError('unknown_command', 'Неизвестная команда Hobbyka CLI.', 2, { command, action })
