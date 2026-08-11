@@ -22,11 +22,14 @@ if (sidecar.schema_version !== 1 || sidecar.agent?.entry_skill !== 'hobbyka-cata
 const skill = await readFile(path.join(pluginRoot, 'skills/hobbyka-catalog-agent/SKILL.md'), 'utf8')
 if (!skill.startsWith('---\nname: hobbyka-catalog-agent\n') || !/не обращаться к Hobbyka API, MCP, глобальному поиску или HTML-каталогу напрямую/i.test(skill)) throw new Error('Некорректный скилл')
 if (!skill.includes('Пустой или слишком узкий первый поиск не является поводом начинать вход') || !skill.includes('встроенном браузере Codex') || !skill.includes('если данные совпали')) throw new Error('Не описан полный сценарий партнёрской авторизации')
-if (!skill.includes('Для того чтобы увидеть партнерские цены и получить доступ к созданию КП необходимо авторизоваться, хотите это сделать?') || !skill.includes('Не сокращать, не перефразировать')) throw new Error('Не зафиксирован призыв к партнёрской авторизации')
+if (!skill.includes('## Ориентация по возможностям') || !skill.includes('Это общее правило для всех текущих и будущих функций CLI') || !skill.includes('`feature_groups`') || !skill.includes('`unlock_paths`') || !skill.includes('`server_capabilities`') || !skill.includes('`recommended_next_step`')) throw new Error('Не зафиксирована универсальная ориентация по возможностям')
+if (!skill.includes('hobbyka-cli.mjs help` и `node scripts/hobbyka-cli.mjs config') || !skill.includes('Незнакомый ключ не расшифровывать по догадке') || !skill.includes('`error.details.guidance`')) throw new Error('Не описана работа со справкой, будущими capabilities и ошибками')
+if (!skill.includes('КП не будет связано с личным кабинетом') || !skill.includes('компания и телефон либо email') || !skill.includes('`offer list`') || !skill.includes('`offer revise`') || !skill.includes('`offer archive`')) throw new Error('Не описаны различия контактного и связанного с кабинетом КП')
 
 const cli = await readFile(path.join(pluginRoot, 'skills/hobbyka-catalog-agent/scripts/hobbyka-cli.mjs'), 'utf8')
 if (!cli.includes("const DEFAULT_BASE_URL = 'https://hobbyka.ru'")) throw new Error('Некорректная публичная среда CLI')
 if (!cli.includes(`const VERSION = '${expectedVersion}'`)) throw new Error('Версия CLI не совпадает с версией плагина')
+if (!cli.includes('const buildGuidance =') || !cli.includes('feature_groups: featureGroups') || !cli.includes('server_capabilities: access.capabilities')) throw new Error('В CLI нет универсальной карты guidance')
 
 const visit = async (directory) => {
   for (const item of await readdir(directory, { withFileTypes: true })) {

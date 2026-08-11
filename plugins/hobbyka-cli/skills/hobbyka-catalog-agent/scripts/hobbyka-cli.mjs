@@ -6,11 +6,11 @@ import { homedir } from 'node:os'
 import path from 'node:path'
 import process from 'node:process'
 
-const VERSION = '0.4.0'
+const VERSION = '0.4.1'
 const DEFAULT_BASE_URL = 'https://hobbyka.ru'
 const DEFAULT_TIMEOUT_MS = 30_000
-const AUTHORIZATION_PROMPT = 'Для того чтобы увидеть партнерские цены и получить доступ к созданию КП необходимо авторизоваться, хотите это сделать?'
-const CONTACT_EXPLANATION = 'Сохранить контакт — записать имя, телефон или email и интерес клиента. Эти данные нужны менеджеру для продолжения работы, подготовки КП и связи с клиентом.'
+const AUTHORIZATION_PROMPT = 'Можно продолжить подбор без передачи данных, создать КП без аккаунта после сохранения контакта или войти через сайт, чтобы связать работу с личным кабинетом. Какой следующий шаг вам подходит?'
+const CONTACT_EXPLANATION = 'Сохранить контакт — записать компанию, телефон либо email, при желании имя, и интерес клиента. Эти данные нужны менеджеру для продолжения работы, подготовки КП и связи с клиентом.'
 
 class CliError extends Error {
   constructor(code, message, exitCode = 1, details = undefined) {
@@ -137,36 +137,98 @@ const accessStatus = (profile) => ({
   profile_verified_at: profile.partner_verified_at || null
 })
 
+const nextStepFor = (command, { authenticated, contactRegistered, outcome }) => {
+  if (outcome === 'blocked') {
+    return { action: 'resolve_requirement', explanation: 'Объясните условие доступа и предложите подходящий безопасный маршрут.' }
+  }
+  const steps = {
+    search: { action: 'review_catalog_result', explanation: 'Покажите найденные товары и уточните, нужно ли сравнение, карточка или переход к КП.' },
+    product: { action: 'review_product', explanation: 'Объясните карточку товара и уточните, нужно ли сравнение или добавление в КП.' },
+    'contacts set': { action: 'continue_protected_goal', explanation: 'Контакт сохранён. Вернитесь к исходной цели и запросите недостающие параметры.' },
+    'auth login': { action: 'complete_site_authorization', explanation: 'Покажите ссылку входа и дождитесь самостоятельного подтверждения на сайте.' },
+    'auth complete': { action: 'explain_authorized_access', explanation: 'Сравните повторённый запрос с публичным результатом и объясните открывшиеся функции.' },
+    'offer create': { action: 'review_created_offer', explanation: 'Покажите номер, статус, итог и PDF из ответа сервера, затем предложите доступное продолжение.' },
+    'offer status': { action: 'review_offer_status', explanation: 'Объясните текущий статус КП и следующее доступное действие.' },
+    'offer list': { action: 'choose_offer', explanation: 'Покажите список и помогите выбрать КП для просмотра, новой версии или заказа.' },
+    'offer revise': { action: 'review_offer_version', explanation: 'Покажите новую версию и её связь с предыдущим КП.' },
+    'offer archive': { action: 'confirm_offer_archive', explanation: 'Сообщите об архивировании и предложите вернуться к списку КП.' },
+    'order create': { action: 'review_created_order', explanation: 'Покажите номер, статус и итог заказа, затем объясните доступные действия.' },
+    'order list': { action: 'choose_order', explanation: 'Покажите список и помогите выбрать заказ для просмотра или изменения.' },
+    'order get': { action: 'review_order', explanation: 'Объясните состав, статус и текущую версию заказа перед следующим действием.' },
+    'order update': { action: 'confirm_order_update', explanation: 'Покажите обновлённое состояние заказа.' },
+    'order cancel': { action: 'confirm_order_cancel', explanation: 'Сообщите об отмене и покажите итоговый статус заказа.' }
+  }
+  return steps[command] || {
+    action: 'clarify_goal',
+    explanation: authenticated || contactRegistered
+      ? 'Объясните текущие возможности и уточните ближайшую цель пользователя.'
+      : 'Уточните, хочет ли пользователь найти товар, создать КП или узнать о других возможностях.'
+  }
+}
+
+const buildGuidance = (profile, { command = 'help', outcome = 'ready' } = {}) => {
+  const access = accessStatus(profile)
+  const contactRegistered = Boolean(profile.access_token) && !access.authenticated
+  const accessActions = ['auth status', 'contacts status']
+  if (access.authenticated) accessActions.push('auth logout')
+  else accessActions.push('auth login')
+  if (profile.pending_device_code) accessActions.push('auth complete')
+  if (!profile.access_token) accessActions.push('contacts set')
+  if (contactRegistered) accessActions.push('contacts clear')
+  const offerActions = access.authenticated
+    ? ['offer create', 'offer status', 'offer list', 'offer revise', 'offer archive']
+    : contactRegistered ? ['offer create', 'offer status'] : []
+  const featureGroups = [
+    { id: 'catalog', available: true, summary: 'Поиск, сравнение и чтение карточек товаров.', actions: ['search', 'product'] },
+    { id: 'access', available: true, summary: 'Вход через сайт, проверка режима и безопасное сохранение контакта.', actions: accessActions, requirement: accessActions.includes('contacts set') ? 'Сохранение контакта требует согласия пользователя.' : null },
+    { id: 'commercial_offers', available: offerActions.length > 0, summary: 'Создание и ведение коммерческих предложений.', actions: offerActions, requirement: offerActions.length ? null : 'Вход через сайт или сохранённый контакт.' },
+    { id: 'orders', available: access.authenticated, summary: 'Создание, просмотр, изменение и отмена своих заказов.', actions: access.authenticated ? ['order create', 'order list', 'order get', 'order update', 'order cancel'] : [], requirement: access.authenticated ? null : 'Вход через сайт Hobbyka.' },
+    { id: 'admin_offers', available: access.mode === 'admin' && access.capabilities.admin_all_offers === true, summary: 'Чтение всех КП для менеджера или администратора.', actions: access.mode === 'admin' && access.capabilities.admin_all_offers === true ? ['admin offers list', 'admin offers get'] : [], requirement: access.mode === 'admin' && access.capabilities.admin_all_offers === true ? null : 'Режим admin и capability admin_all_offers.' },
+    { id: 'admin_orders', available: access.mode === 'admin' && access.capabilities.admin_all_orders === true, summary: 'Чтение всех заказов для менеджера или администратора.', actions: access.mode === 'admin' && access.capabilities.admin_all_orders === true ? ['admin orders list', 'admin orders get'] : [], requirement: access.mode === 'admin' && access.capabilities.admin_all_orders === true ? null : 'Режим admin и capability admin_all_orders.' },
+    { id: 'cli_info', available: true, summary: 'Справка, версия и текущая конфигурация CLI.', actions: ['help', 'version', 'config'] }
+  ]
+  const unlockPaths = []
+  if (!access.authenticated) {
+    unlockPaths.push({ id: 'site_login', suitable_for: 'Есть аккаунт Hobbyka и нужна связь с личным кабинетом.', required: ['подтверждение входа на сайте Hobbyka'], next_command: 'node scripts/hobbyka-cli.mjs auth login' })
+  }
+  if (!profile.access_token) {
+    unlockPaths.push({ id: 'contact_registration', suitable_for: 'Пользователю без аккаунта нужна защищённая операция вроде создания КП.', required: ['согласие пользователя', 'компания', 'телефон либо email'], next_command: 'node scripts/hobbyka-cli.mjs contacts set --stdin' })
+  }
+  return {
+    current_state: { mode: access.mode, site_authorized: access.authenticated, contact_registered: contactRegistered },
+    feature_groups: featureGroups,
+    unlock_paths: unlockPaths,
+    server_capabilities: access.capabilities,
+    recommended_next_step: nextStepFor(command, { authenticated: access.authenticated, contactRegistered, outcome })
+  }
+}
+
 const partnerStatus = (profile) => ({
   connected: authenticatedMode(profile),
   mode: accessStatus(profile).mode,
   profile_verified_at: profile.partner_verified_at || null
 })
 
-const requireContact = (profile) => {
+const requireContact = (profile, command) => {
   if (profile.first_request_completed && !profile.access_token) {
     throw new CliError(
       'contact_required',
       'Для защищённой операции авторизуйтесь через аккаунт Hobbyka или сохраните контакт.',
       3,
-      {
-        partner_login: {
-          eligibility: 'existing_site_account',
-          next_command: 'node scripts/hobbyka-cli.mjs auth login'
-        },
-        contact_registration: {
-          eligibility: 'no_site_account',
-          next_command: 'node scripts/hobbyka-cli.mjs contacts set --stdin',
-          explanation: CONTACT_EXPLANATION
-        }
-      }
+      authorizationGate(command)
     )
   }
 }
 
-const requireAdmin = (profile) => {
+const requireAuthorized = (profile, command) => {
+  if (!authenticatedMode(profile)) {
+    throw new CliError('authorization_required', 'Войдите через сайт командой auth login.', 3, { guidance: buildGuidance(profile, { command, outcome: 'blocked' }) })
+  }
+}
+
+const requireAdmin = (profile, command) => {
   if (accessStatus(profile).mode !== 'admin') {
-    throw new CliError('admin_required', 'Команда доступна менеджерам и администраторам Hobbyka после auth login.', 4)
+    throw new CliError('admin_required', 'Команда доступна менеджерам и администраторам Hobbyka после auth login.', 4, { guidance: buildGuidance(profile, { command, outcome: 'blocked' }) })
   }
 }
 
@@ -227,12 +289,14 @@ const request = async (baseUrl, route, { method = 'GET', body, token, idempotenc
   }
 }
 
-const authorizationGate = () => ({
+const authorizationGate = (command = 'protected operation') => ({
   status: 'required',
   message: AUTHORIZATION_PROMPT,
+  guidance: buildGuidance({ first_request_completed: true, mode: 'public' }, { command, outcome: 'blocked' }),
   partner_login: {
     eligibility: 'existing_site_account',
-    next_command: 'node scripts/hobbyka-cli.mjs auth login'
+    next_command: 'node scripts/hobbyka-cli.mjs auth login',
+    explanation: 'Вход связывает дальнейшую работу с КП с личным кабинетом.'
   },
   contact_registration: {
     eligibility: 'no_site_account',
@@ -242,25 +306,32 @@ const authorizationGate = () => ({
 })
 
 const completeFirstRequest = async (state, baseUrl, profile, result, repeatRequest, hasResult = true) => {
-  if (!hasResult && !profile.access_token) return result
+  if (!hasResult && !profile.access_token) return { ...result, guidance: buildGuidance(profile, { command: repeatRequest.command }) }
   if (!profile.first_request_completed && !profile.access_token) {
     const updated = { ...profile, mode: 'public', first_request_completed: true, pending_repeat: repeatRequest, updated_at: new Date().toISOString() }
     state.profiles[baseUrl] = updated
     await writeState(state)
-    return { ...result, contact_gate: authorizationGate() }
+    return { ...result, contact_gate: authorizationGate(repeatRequest.command), guidance: buildGuidance(updated, { command: repeatRequest.command }) }
   }
   if (!profile.access_token) {
     const updated = { ...profile, pending_repeat: repeatRequest, updated_at: new Date().toISOString() }
     state.profiles[baseUrl] = updated
     await writeState(state)
-    return { ...result, contact_gate: authorizationGate() }
+    return { ...result, contact_gate: authorizationGate(repeatRequest.command), guidance: buildGuidance(updated, { command: repeatRequest.command }) }
   }
-  return { ...result, access: accessStatus(profile), contact_gate: { status: authenticatedMode(profile) ? profile.mode : 'registered' } }
+  return { ...result, access: accessStatus(profile), contact_gate: { status: authenticatedMode(profile) ? profile.mode : 'registered' }, guidance: buildGuidance(profile, { command: repeatRequest.command }) }
 }
 
 const serverProfile = (payload) => payload?.data || payload
 
 const normalizedServerMode = (profile) => profile?.mode === 'admin' ? 'admin' : 'partner'
+
+const profileWithVerifiedAccess = (profile, verifiedProfile) => ({
+  ...profile,
+  mode: normalizedServerMode(verifiedProfile),
+  roles: Array.isArray(verifiedProfile?.roles) ? verifiedProfile.roles : profile.roles,
+  capabilities: verifiedProfile?.capabilities && typeof verifiedProfile.capabilities === 'object' ? verifiedProfile.capabilities : profile.capabilities
+})
 
 const replayPendingRequest = async (baseUrl, profile) => {
   const pending = profile.pending_repeat
@@ -297,6 +368,7 @@ const publicIdentifier = (value, name) => {
 const help = () => ({
   ok: true,
   version: VERSION,
+  guidance: buildGuidance({ first_request_completed: false, mode: 'public' }),
   commands: [
     'search --query <text> [--limit 10] [--section-code <code>] [--recommendation-profile <id>]',
     'product --id <id> [--recommendation-profile <id>]',
@@ -345,7 +417,8 @@ const main = async () => {
       state_file: stateFile(),
       contact: contactStatus(profile),
       access: accessStatus(profile),
-      partner: partnerStatus(profile)
+      partner: partnerStatus(profile),
+      guidance: buildGuidance(profile, { command })
     }
   }
 
@@ -355,11 +428,13 @@ const main = async () => {
     if (authenticatedMode(profile)) {
       const verified = await request(baseUrl, '/api/partner/v1/profile/', { token: profile.access_token })
       const verifiedProfile = serverProfile(verified)
+      const currentProfile = profileWithVerifiedAccess(profile, verifiedProfile)
       return {
         ok: true, command: `${command} login`,
         status: 'already_authorized',
-        access: { ...accessStatus(profile), mode: normalizedServerMode(verifiedProfile) },
-        profile: verifiedProfile
+        access: accessStatus(currentProfile),
+        profile: verifiedProfile,
+        guidance: buildGuidance(currentProfile, { command: 'auth complete' })
       }
     }
     const authorization = await request(baseUrl, '/api/partner/v1/auth/device/', {
@@ -382,7 +457,8 @@ const main = async () => {
       verification_uri: data?.verification_uri,
       verification_uri_complete: data?.verification_uri_complete,
       expires_at: state.profiles[baseUrl].pending_expires_at,
-      next_command: 'node scripts/hobbyka-cli.mjs auth complete'
+      next_command: 'node scripts/hobbyka-cli.mjs auth complete',
+      guidance: buildGuidance(state.profiles[baseUrl], { command: 'auth login' })
     }
   }
 
@@ -391,7 +467,7 @@ const main = async () => {
     const authorization = await request(baseUrl, '/api/partner/v1/auth/token/', { method: 'POST', body: { device_code: deviceCode } })
     const data = authorization?.data || authorization
     if (data?.status === 'authorization_pending') {
-      return { ok: true, command: `${command} complete`, status: 'authorization_pending', user_code: profile.pending_user_code, verification_uri_complete: `${baseUrl}/personal/partner-cli/?code=${encodeURIComponent(profile.pending_user_code)}` }
+      return { ok: true, command: `${command} complete`, status: 'authorization_pending', user_code: profile.pending_user_code, verification_uri_complete: `${baseUrl}/personal/partner-cli/?code=${encodeURIComponent(profile.pending_user_code)}`, guidance: buildGuidance(profile, { command: 'auth login' }) }
     }
     const token = scalar(data?.access_token, 'access_token', { required: true, max: 512 })
     state.profiles[baseUrl] = {
@@ -413,31 +489,32 @@ const main = async () => {
     delete state.profiles[baseUrl].pending_expires_at
     delete state.profiles[baseUrl].pending_repeat
     await writeState(state)
-    return { ok: true, command: `${command} complete`, status: 'authorized', access: accessStatus(state.profiles[baseUrl]), profile: verifiedProfile, replayed_request: replayedRequest }
+    return { ok: true, command: `${command} complete`, status: 'authorized', access: accessStatus(state.profiles[baseUrl]), profile: verifiedProfile, replayed_request: replayedRequest, guidance: buildGuidance(state.profiles[baseUrl], { command: 'auth complete' }) }
   }
 
   if (authCommand && action === 'status') {
-    if (!authenticatedMode(profile)) return { ok: true, command: `${command} status`, access: accessStatus(profile) }
+    if (!authenticatedMode(profile)) return { ok: true, command: `${command} status`, access: accessStatus(profile), guidance: buildGuidance(profile, { command: 'auth status' }) }
     const verified = await request(baseUrl, '/api/partner/v1/profile/', { token: profile.access_token })
     const verifiedProfile = serverProfile(verified)
-    return { ok: true, command: `${command} status`, access: { ...accessStatus(profile), mode: normalizedServerMode(verifiedProfile) }, profile: verifiedProfile }
+    const currentProfile = profileWithVerifiedAccess(profile, verifiedProfile)
+    return { ok: true, command: `${command} status`, access: accessStatus(currentProfile), profile: verifiedProfile, guidance: buildGuidance(currentProfile, { command: 'auth status' }) }
   }
 
   if (authCommand && action === 'logout') {
     if (authenticatedMode(profile)) await request(baseUrl, '/api/partner/v1/auth/logout/', { method: 'POST', body: {}, token: profile.access_token })
     state.profiles[baseUrl] = { first_request_completed: false, mode: 'public', updated_at: new Date().toISOString() }
     await writeState(state)
-    return { ok: true, command: `${command} logout`, access: accessStatus(state.profiles[baseUrl]), partner: partnerStatus(state.profiles[baseUrl]) }
+    return { ok: true, command: `${command} logout`, access: accessStatus(state.profiles[baseUrl]), partner: partnerStatus(state.profiles[baseUrl]), guidance: buildGuidance(state.profiles[baseUrl], { command: 'auth logout' }) }
   }
 
   if (command === 'contacts' && action === 'status') {
-    return { ok: true, command: 'contacts status', contact: contactStatus(profile), first_request_completed: Boolean(profile.first_request_completed) }
+    return { ok: true, command: 'contacts status', contact: contactStatus(profile), first_request_completed: Boolean(profile.first_request_completed), guidance: buildGuidance(profile, { command: 'contacts status' }) }
   }
 
   if (command === 'contacts' && action === 'clear') {
     state.profiles[baseUrl] = { first_request_completed: Boolean(profile.first_request_completed), updated_at: new Date().toISOString() }
     await writeState(state)
-    return { ok: true, command: 'contacts clear', contact: contactStatus(state.profiles[baseUrl]) }
+    return { ok: true, command: 'contacts clear', contact: contactStatus(state.profiles[baseUrl]), guidance: buildGuidance(state.profiles[baseUrl], { command: 'contacts clear' }) }
   }
 
   if (command === 'contacts' && action === 'set') {
@@ -465,7 +542,7 @@ const main = async () => {
       updated_at: new Date().toISOString()
     }
     await writeState(state)
-    return { ok: true, command: 'contacts set', contact: contactStatus(state.profiles[baseUrl]), expires_at: state.profiles[baseUrl].expires_at }
+    return { ok: true, command: 'contacts set', contact: contactStatus(state.profiles[baseUrl]), expires_at: state.profiles[baseUrl].expires_at, guidance: buildGuidance(state.profiles[baseUrl], { command: 'contacts set' }) }
   }
 
   if (command === 'search') {
@@ -490,8 +567,8 @@ const main = async () => {
   }
 
   if (command === 'offer' && action === 'create') {
-    requireContact(profile)
-    if (!profile.access_token) throw new CliError('contact_required', 'Перед созданием КП зарегистрируйте контакт.', 3)
+    requireContact(profile, 'offer create')
+    if (!profile.access_token) throw new CliError('contact_required', 'Перед созданием КП зарегистрируйте контакт.', 3, { guidance: buildGuidance(profile, { command: 'offer create', outcome: 'blocked' }) })
     const body = { items: parseItems(flags.items), agent: 'hobbyka-cli' }
     const object = {
       name: scalar(flags['object-name'], 'object-name', { max: 500 }),
@@ -508,55 +585,55 @@ const main = async () => {
       token: profile.access_token,
       idempotencyKey: scalar(flags['idempotency-key'], 'idempotency-key', { max: 128 }) || randomUUID()
     })
-    return { ok: true, command: 'offer create', data, recommendation: recommendation(flags), contact_gate: { status: partnerMode ? 'partner' : 'registered' } }
+    return { ok: true, command: 'offer create', data, recommendation: recommendation(flags), contact_gate: { status: partnerMode ? 'partner' : 'registered' }, guidance: buildGuidance(profile, { command: 'offer create' }) }
   }
 
   if (command === 'offer' && action === 'status') {
-    requireContact(profile)
+    requireContact(profile, 'offer status')
     const publicId = scalar(flags['public-id'], 'public-id', { required: true, max: 64 })
     if (!/^[a-f0-9]{32,64}$/.test(publicId)) throw new CliError('invalid_public_id', 'Некорректный public-id КП.', 2)
     const data = await request(baseUrl, `/api/ai/v1/commercial-offers/${publicId}/?agent=hobbyka-cli`, { token: profile.access_token })
-    return { ok: true, command: 'offer status', data, contact_gate: { status: 'registered' } }
+    return { ok: true, command: 'offer status', data, contact_gate: { status: 'registered' }, guidance: buildGuidance(profile, { command: 'offer status' }) }
   }
 
   if (command === 'offer' && action === 'list') {
-    if (!authenticatedMode(profile)) throw new CliError('authorization_required', 'Войдите через сайт командой auth login.', 3)
+    requireAuthorized(profile, 'offer list')
     const limit = integer(flags.limit, 'limit', { min: 1, max: 100, fallback: 50 })
     const data = await request(baseUrl, `/api/partner/v1/commercial-offers/?limit=${limit}`, { token: profile.access_token })
-    return { ok: true, command: 'offer list', data }
+    return { ok: true, command: 'offer list', data, guidance: buildGuidance(profile, { command: 'offer list' }) }
   }
 
   if (command === 'offer' && action === 'revise') {
-    if (!authenticatedMode(profile)) throw new CliError('authorization_required', 'Войдите через сайт командой auth login.', 3)
+    requireAuthorized(profile, 'offer revise')
     const publicId = publicIdentifier(flags['public-id'], 'public-id')
     const body = { expected_version: integer(flags['expected-version'], 'expected-version'), items: parseItems(flags.items), agent: 'hobbyka-cli' }
     const data = await request(baseUrl, `/api/partner/v1/commercial-offers/${publicId}/`, {
       method: 'PATCH', body, token: profile.access_token,
       idempotencyKey: scalar(flags['idempotency-key'], 'idempotency-key', { max: 128 }) || randomUUID()
     })
-    return { ok: true, command: 'offer revise', data }
+    return { ok: true, command: 'offer revise', data, guidance: buildGuidance(profile, { command: 'offer revise' }) }
   }
 
   if (command === 'offer' && action === 'archive') {
-    if (!authenticatedMode(profile)) throw new CliError('authorization_required', 'Войдите через сайт командой auth login.', 3)
+    requireAuthorized(profile, 'offer archive')
     const publicId = publicIdentifier(flags['public-id'], 'public-id')
     const data = await request(baseUrl, `/api/partner/v1/commercial-offers/${publicId}/archive/`, {
       method: 'POST', body: { expected_version: integer(flags['expected-version'], 'expected-version') }, token: profile.access_token
     })
-    return { ok: true, command: 'offer archive', data }
+    return { ok: true, command: 'offer archive', data, guidance: buildGuidance(profile, { command: 'offer archive' }) }
   }
 
   if (command === 'order') {
-    if (!authenticatedMode(profile)) throw new CliError('authorization_required', 'Войдите через сайт командой auth login.', 3)
+    requireAuthorized(profile, `order ${action || ''}`.trim())
     if (action === 'list') {
       const limit = integer(flags.limit, 'limit', { min: 1, max: 100, fallback: 50 })
       const data = await request(baseUrl, `/api/partner/v1/orders/?limit=${limit}`, { token: profile.access_token })
-      return { ok: true, command: 'order list', data }
+      return { ok: true, command: 'order list', data, guidance: buildGuidance(profile, { command: 'order list' }) }
     }
     if (action === 'get') {
       const publicId = publicIdentifier(flags['public-id'], 'public-id')
       const data = await request(baseUrl, `/api/partner/v1/orders/${publicId}/`, { token: profile.access_token })
-      return { ok: true, command: 'order get', data }
+      return { ok: true, command: 'order get', data, guidance: buildGuidance(profile, { command: 'order get' }) }
     }
     if (action === 'create') {
       const body = { comments: scalar(flags.comments, 'comments', { max: 1000 }) || undefined }
@@ -567,24 +644,24 @@ const main = async () => {
         method: 'POST', body, token: profile.access_token,
         idempotencyKey: scalar(flags['idempotency-key'], 'idempotency-key', { max: 128 }) || randomUUID()
       })
-      return { ok: true, command: 'order create', data }
+      return { ok: true, command: 'order create', data, guidance: buildGuidance(profile, { command: 'order create' }) }
     }
     if (action === 'update') {
       const publicId = publicIdentifier(flags['public-id'], 'public-id')
       const body = { expected_version: integer(flags['expected-version'], 'expected-version'), comments: scalar(flags.comments, 'comments', { max: 1000 }) }
       const data = await request(baseUrl, `/api/partner/v1/orders/${publicId}/`, { method: 'PATCH', body, token: profile.access_token })
-      return { ok: true, command: 'order update', data }
+      return { ok: true, command: 'order update', data, guidance: buildGuidance(profile, { command: 'order update' }) }
     }
     if (action === 'cancel') {
       const publicId = publicIdentifier(flags['public-id'], 'public-id')
       const body = { expected_version: integer(flags['expected-version'], 'expected-version'), reason: scalar(flags.reason, 'reason', { max: 500 }) }
       const data = await request(baseUrl, `/api/partner/v1/orders/${publicId}/cancel/`, { method: 'POST', body, token: profile.access_token })
-      return { ok: true, command: 'order cancel', data }
+      return { ok: true, command: 'order cancel', data, guidance: buildGuidance(profile, { command: 'order cancel' }) }
     }
   }
 
   if (command === 'admin') {
-    requireAdmin(profile)
+    requireAdmin(profile, `admin ${action || ''} ${positionals[2] || ''}`.trim())
     const resource = action
     const operation = positionals[2]
     if (resource === 'offers' && operation === 'list') {
@@ -598,12 +675,12 @@ const main = async () => {
         ['limit', integer(flags.limit, 'limit', { min: 1, max: 100, fallback: 50 })]
       ])}`
       const data = await request(baseUrl, route, { token: profile.access_token })
-      return { ok: true, command: 'admin offers list', access: accessStatus(profile), data }
+      return { ok: true, command: 'admin offers list', access: accessStatus(profile), data, guidance: buildGuidance(profile, { command: 'admin offers list' }) }
     }
     if (resource === 'offers' && operation === 'get') {
       const id = integer(flags.id, 'id')
       const data = await request(baseUrl, `/api/internal/v1/commercial-offers/${id}/`, { token: profile.access_token })
-      return { ok: true, command: 'admin offers get', access: accessStatus(profile), data }
+      return { ok: true, command: 'admin offers get', access: accessStatus(profile), data, guidance: buildGuidance(profile, { command: 'admin offers get' }) }
     }
     if (resource === 'orders' && operation === 'list') {
       const route = `/api/internal/v1/orders/?${buildQuery([
@@ -616,12 +693,12 @@ const main = async () => {
         ['limit', integer(flags.limit, 'limit', { min: 1, max: 100, fallback: 50 })]
       ])}`
       const data = await request(baseUrl, route, { token: profile.access_token })
-      return { ok: true, command: 'admin orders list', access: accessStatus(profile), data }
+      return { ok: true, command: 'admin orders list', access: accessStatus(profile), data, guidance: buildGuidance(profile, { command: 'admin orders list' }) }
     }
     if (resource === 'orders' && operation === 'get') {
       const id = integer(flags.id, 'id')
       const data = await request(baseUrl, `/api/internal/v1/orders/${id}/`, { token: profile.access_token })
-      return { ok: true, command: 'admin orders get', access: accessStatus(profile), data }
+      return { ok: true, command: 'admin orders get', access: accessStatus(profile), data, guidance: buildGuidance(profile, { command: 'admin orders get' }) }
     }
   }
 

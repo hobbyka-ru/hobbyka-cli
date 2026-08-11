@@ -1,6 +1,6 @@
 {
   "name": "hobbyka-cli",
-  "version": "0.4.0",
+  "version": "0.4.1",
   "description": "Find and compare Hobbyka benches, bins, lighting and other products, check current prices, and prepare commercial offers through the official Hobbyka CLI.",
   "author": {
     "name": "Hobbyka",

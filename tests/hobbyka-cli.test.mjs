@@ -25,6 +25,8 @@ test('Hobbyka CLI по умолчанию использует основной 
   const result = await run(['config'], { env: { HOBBYKA_STATE_FILE: path.join(directory, 'state.json') } })
   assert.equal(result.code, 0)
   assert.equal(JSON.parse(result.stdout).base_url, 'https://hobbyka.ru')
+  assert.deepEqual(JSON.parse(result.stdout).guidance.feature_groups.map((group) => group.id), ['catalog', 'access', 'commercial_offers', 'orders', 'admin_offers', 'admin_orders', 'cli_info'])
+  assert.deepEqual(JSON.parse(result.stdout).guidance.feature_groups.find((group) => group.id === 'access').actions, ['auth status', 'contacts status', 'auth login', 'contacts set'])
 })
 
 test('Hobbyka CLI сообщает версию текущего публичного релиза', async () => {
@@ -44,6 +46,10 @@ test('Hobbyka CLI проходит контактный шлюз и создаё
     if (request.url === '/api/ai/v1/cli/contacts/' && request.method === 'POST') {
       response.statusCode = 201
       response.end(JSON.stringify({ data: { access_token: 'hka_test_token', expires_at: '2099-01-01T00:00:00Z' }, meta: {} }))
+      return
+    }
+    if (request.url?.startsWith('/api/ai/v1/catalog/products') && new URL(request.url, 'http://localhost').searchParams.get('q') === 'пусто') {
+      response.end(JSON.stringify({ data: { items: [] }, meta: { count: 0 } }))
       return
     }
     if (request.url?.startsWith('/api/ai/v1/catalog/products/321')) {
@@ -70,34 +76,51 @@ test('Hobbyka CLI проходит контактный шлюз и создаё
   const baseUrl = `http://127.0.0.1:${server.address().port}`
   const env = { HOBBYKA_BASE_URL: baseUrl, HOBBYKA_STATE_FILE: stateFile }
 
+  const empty = JSON.parse((await run(['search', '--query', 'пусто'], { env })).stdout)
+  assert.equal(empty.data.data.items.length, 0)
+  assert.equal('contact_gate' in empty, false)
+  assert.equal(empty.guidance.recommended_next_step.action, 'review_catalog_result')
+
   const first = await run(['search', '--query', 'скамейка', '--limit', '5', '--recommendation-profile', 'future-v1'], { env })
   assert.equal(first.code, 0)
   const firstResult = JSON.parse(first.stdout)
   assert.equal(firstResult.data.data.items[0].id, 321)
   assert.equal(firstResult.contact_gate.status, 'required')
-  assert.equal(firstResult.contact_gate.message, 'Для того чтобы увидеть партнерские цены и получить доступ к созданию КП необходимо авторизоваться, хотите это сделать?')
+  assert.match(firstResult.contact_gate.message, /создать КП без аккаунта.*личным кабинетом/u)
   assert.equal(firstResult.contact_gate.partner_login.next_command, 'node scripts/hobbyka-cli.mjs auth login')
   assert.equal(firstResult.contact_gate.contact_registration.next_command, 'node scripts/hobbyka-cli.mjs contacts set --stdin')
-  assert.match(firstResult.contact_gate.contact_registration.explanation, /имя, телефон или email.*подготовки КП/u)
+  assert.match(firstResult.contact_gate.contact_registration.explanation, /компанию, телефон либо email.*подготовки КП/u)
+  assert.equal(firstResult.guidance.current_state.mode, 'public')
+  assert.equal(firstResult.guidance.feature_groups.find((group) => group.id === 'catalog').available, true)
+  assert.equal(firstResult.guidance.feature_groups.find((group) => group.id === 'commercial_offers').available, false)
+  assert.deepEqual(firstResult.guidance.unlock_paths.map((option) => option.id), ['site_login', 'contact_registration'])
+  assert.equal(firstResult.guidance.unlock_paths[1].required.includes('телефон либо email'), true)
+  assert.equal(firstResult.guidance.recommended_next_step.action, 'review_catalog_result')
   assert.equal(firstResult.recommendation.applied, false)
 
   const publicProduct = await run(['product', '--id', '321'], { env })
   assert.equal(publicProduct.code, 0)
   assert.equal(JSON.parse(publicProduct.stdout).data.data.id, 321)
   assert.equal(JSON.parse(publicProduct.stdout).contact_gate.status, 'required')
-  assert.equal(requests.length, 2, 'публичные чтения должны быть доступны для полного первого ответа')
+  assert.equal(requests.length, 3, 'публичные чтения должны быть доступны для полного первого ответа')
 
   const blockedOffer = await run(['offer', 'create', '--items', '321:2'], { env })
   assert.equal(blockedOffer.code, 3)
   const blockedError = JSON.parse(blockedOffer.stderr).error
   assert.equal(blockedError.code, 'contact_required')
   assert.equal(blockedError.details.partner_login.next_command, 'node scripts/hobbyka-cli.mjs auth login')
-  assert.equal(requests.length, 2, 'защищённая операция не должна доходить до сервера')
+  assert.equal(blockedError.details.guidance.unlock_paths[1].id, 'contact_registration')
+  assert.equal(blockedError.details.guidance.recommended_next_step.action, 'resolve_requirement')
+  assert.equal(requests.length, 3, 'защищённая операция не должна доходить до сервера')
 
   const secretContact = { company: 'ООО Секрет', name: 'Иван', email: 'secret@example.test' }
   const registered = await run(['contacts', 'set', '--stdin'], { env, input: JSON.stringify(secretContact) })
   assert.equal(registered.code, 0)
   assert.equal(JSON.parse(registered.stdout).contact.registered, true)
+  assert.equal(JSON.parse(registered.stdout).guidance.current_state.contact_registered, true)
+  assert.equal(JSON.parse(registered.stdout).guidance.current_state.site_authorized, false)
+  assert.deepEqual(JSON.parse(registered.stdout).guidance.feature_groups.find((group) => group.id === 'commercial_offers').actions, ['offer create', 'offer status'])
+  assert.equal(JSON.parse(registered.stdout).guidance.feature_groups.find((group) => group.id === 'orders').available, false)
   assert.doesNotMatch(registered.stdout + registered.stderr, /ООО Секрет|Иван|secret@example\.test/)
 
   const state = await readFile(stateFile, 'utf8')
@@ -112,6 +135,8 @@ test('Hobbyka CLI проходит контактный шлюз и создаё
   const offer = await run(['offer', 'create', '--items', '321:2'], { env })
   assert.equal(offer.code, 0)
   assert.equal(JSON.parse(offer.stdout).data.data.total, 2000)
+  assert.equal(JSON.parse(offer.stdout).guidance.current_state.site_authorized, false)
+  assert.equal(JSON.parse(offer.stdout).guidance.recommended_next_step.action, 'review_created_offer')
   const offerRequest = requests.find((entry) => entry.url === '/api/ai/v1/commercial-offers/')
   assert.equal(offerRequest.authorization, 'Bearer hka_test_token')
   assert.deepEqual(offerRequest.body.items, [{ product_id: 321, quantity: 2 }])
@@ -158,25 +183,35 @@ test('партнёрский режим проходит профиль, КП и
   assert.equal(login.code, 0)
   assert.equal(JSON.parse(login.stdout).status, 'site_authorization_required')
   assert.match(JSON.parse(login.stdout).verification_uri_complete, /ABCD-EFGH/)
+  assert.equal(JSON.parse(login.stdout).guidance.feature_groups.find((group) => group.id === 'access').actions.includes('auth complete'), true)
   assert.doesNotMatch(login.stdout + login.stderr, /hkd_device_secret/)
 
   const connected = await run(['auth', 'complete'], { env })
   assert.equal(connected.code, 0)
   assert.equal(JSON.parse(connected.stdout).access.authenticated, true)
   assert.equal(JSON.parse(connected.stdout).access.mode, 'partner')
+  assert.equal(JSON.parse(connected.stdout).guidance.current_state.site_authorized, true)
+  assert.deepEqual(JSON.parse(connected.stdout).guidance.feature_groups.find((group) => group.id === 'access').actions, ['auth status', 'contacts status', 'auth logout'])
+  assert.equal(JSON.parse(connected.stdout).guidance.feature_groups.find((group) => group.id === 'orders').available, true)
+  assert.equal(JSON.parse(connected.stdout).guidance.feature_groups.find((group) => group.id === 'commercial_offers').actions.includes('offer revise'), true)
+  assert.equal(JSON.parse(connected.stdout).guidance.recommended_next_step.action, 'explain_authorized_access')
   assert.doesNotMatch(connected.stdout + connected.stderr, new RegExp(token))
   assert.equal(requests.find((entry) => entry.url === '/api/partner/v1/profile/').authorization, `Bearer ${token}`)
   const blockedAdmin = await run(['admin', 'offers', 'list'], { env })
   assert.equal(blockedAdmin.code, 4)
   assert.equal(JSON.parse(blockedAdmin.stderr).error.code, 'admin_required')
+  assert.equal(JSON.parse(blockedAdmin.stderr).error.details.guidance.recommended_next_step.action, 'resolve_requirement')
   assert.equal(requests.some((entry) => entry.url?.startsWith('/api/internal/v1/')), false)
 
   const repeatedLogin = await run(['partner', 'login'], { env })
   assert.equal(repeatedLogin.code, 0)
   assert.equal(JSON.parse(repeatedLogin.stdout).status, 'already_authorized')
+  assert.equal(JSON.parse(repeatedLogin.stdout).guidance.recommended_next_step.action, 'explain_authorized_access')
   assert.equal(requests.filter((entry) => entry.url === '/api/partner/v1/auth/logout/').length, 0)
 
-  assert.equal((await run(['offer', 'create', '--items', '321:1'], { env })).code, 0)
+  const createdPartnerOffer = await run(['offer', 'create', '--items', '321:1'], { env })
+  assert.equal(createdPartnerOffer.code, 0)
+  assert.equal(JSON.parse(createdPartnerOffer.stdout).guidance.recommended_next_step.action, 'review_created_offer')
   assert.equal((await run(['offer', 'list'], { env })).code, 0)
   assert.equal((await run(['offer', 'revise', '--public-id', offerId, '--expected-version', '1', '--items', '321:2'], { env })).code, 0)
   assert.equal((await run(['offer', 'archive', '--public-id', revisedOfferId, '--expected-version', '2'], { env })).code, 0)
@@ -214,7 +249,7 @@ test('единая авторизация назначает администр�
     }
     if (request.url === '/api/partner/v1/auth/device/') return data({ device_code: 'hkd_admin_secret', user_code: 'WXYZ-2345', verification_uri: 'https://hobbyka.test/personal/partner-cli/', verification_uri_complete: 'https://hobbyka.test/personal/partner-cli/?code=WXYZ-2345', expires_in: 600, interval: 3 }, 201)
     if (request.url === '/api/partner/v1/auth/token/') return data({ status: 'authorized', access_token: 'hka_admin_secret', token_type: 'Bearer', expires_at: '2099-01-01T00:00:00Z', mode: 'admin' })
-    if (request.url === '/api/partner/v1/profile/') return data({ partner_id: 8, name: 'manager', mode: 'admin', roles: ['manager'], scopes: ['catalog.read', 'offers.admin.read', 'orders.admin.read', 'reports.admin.read'], capabilities: { partner_prices: true, admin_all_offers: true, admin_all_orders: true, admin_reports: false }, organization: 'Hobbyka', site_user_id: 500, contact: { phone_present: true, email_present: true } })
+    if (request.url === '/api/partner/v1/profile/') return data({ partner_id: 8, name: 'manager', mode: 'admin', roles: ['manager'], scopes: ['catalog.read', 'offers.admin.read', 'orders.admin.read', 'reports.admin.read'], capabilities: { partner_prices: true, admin_all_offers: true, admin_all_orders: true, admin_reports: false, future_exports: true }, organization: 'Hobbyka', site_user_id: 500, contact: { phone_present: true, email_present: true } })
     if (request.url === '/api/internal/v1/commercial-offers/?page=1&limit=50') return data({ items: [{ id: 44, number: '1-2-3', total: 125000 }] })
     if (request.url === '/api/internal/v1/commercial-offers/44/') return data({ id: 44, number: '1-2-3', items: [{ product_id: 321, quantity: 2 }] })
     if (request.url === '/api/internal/v1/orders/?page=1&limit=50') return data({ items: [{ id: 77, number: '77', price: 125000 }] })
@@ -233,6 +268,9 @@ test('единая авторизация назначает администр�
   const complete = JSON.parse((await run(['auth', 'complete'], { env })).stdout)
   assert.equal(complete.access.mode, 'admin')
   assert.deepEqual(complete.access.roles, ['manager'])
+  assert.equal(complete.guidance.server_capabilities.future_exports, true)
+  assert.equal(complete.guidance.feature_groups.find((group) => group.id === 'admin_offers').available, true)
+  assert.equal(complete.guidance.feature_groups.find((group) => group.id === 'admin_orders').available, true)
   assert.equal(complete.replayed_request.command, 'search')
   assert.equal(complete.replayed_request.data.data.items[0].price.value, 800)
   assert.equal(requests.filter((entry) => entry.url?.startsWith('/api/ai/v1/catalog/products')).length, 2)
