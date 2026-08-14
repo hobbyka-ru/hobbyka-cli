@@ -1,6 +1,6 @@
 # Hobbyka CLI
 
-Официальный открытый плагин Hobbyka для ИИ-агентов, версия `0.4.1`. Агент использует компактный CLI для поиска товаров, проверки серверных цен и подготовки коммерческих предложений.
+Официальный открытый плагин Hobbyka для ИИ-агентов, версия `0.5.0`. Агент использует компактный CLI для поиска товаров, локального сопоставления по фотографии, проверки серверных цен и подготовки коммерческих предложений.
 
 - Точка обнаружения и документация: [hobbyka.ru/ai/cli/](https://hobbyka.ru/ai/cli/).
 - Рабочий API CLI: `https://hobbyka.ru`.
@@ -8,7 +8,7 @@
 ## Установка в Codex
 
 ```bash
-codex plugin marketplace add https://github.com/mmasterkov/hobbyka-cli
+codex plugin marketplace add https://github.com/hobbyka-ru/hobbyka-cli
 codex plugin add hobbyka-cli@hobbyka-public
 ```
 
@@ -17,6 +17,16 @@ codex plugin add hobbyka-cli@hobbyka-public
 ```bash
 node plugins/hobbyka-cli/skills/hobbyka-catalog-agent/scripts/hobbyka-cli.mjs search --query "скамейка" --limit 5
 ```
+
+## Локальный поиск по изображению
+
+```bash
+hf auth login # после принятия лицензии DINOv3
+node plugins/hobbyka-cli/skills/hobbyka-catalog-agent/scripts/hobbyka-cli.mjs image-index build
+node plugins/hobbyka-cli/skills/hobbyka-catalog-agent/scripts/hobbyka-cli.mjs search --image /path/photo.jpg
+```
+
+Индекс и модель работают локально. Исходная фотография не передаётся в Hobbyka. При уверенном совпадении CLI запрашивает по ID актуальную полную карточку товара; при недостаточной уверенности возвращает top-20 кандидатов. Для запуска нужен `uv`. Веса Meta DINOv3 не распространяются вместе с плагином.
 
 ## Контракт CLI
 
@@ -53,6 +63,9 @@ JSON контакта: `company` и хотя бы одно из полей `phon
 - `HOBBYKA_BASE_URL` — переопределение адреса среды; значение по умолчанию `https://hobbyka.ru`;
 - `HOBBYKA_STATE_FILE` — отдельный файл состояния для изолированной проверки;
 - `HOBBYKA_TIMEOUT_MS` — тайм-аут 1000–120000 мс.
+- `HOBBYKA_IMAGE_INDEX_DIR` — каталог локального визуального индекса;
+- `HOBBYKA_DINOV3_MODEL` — локальный путь либо Hugging Face ID модели;
+- `HOBBYKA_VISION_TIMEOUT_MS` — тайм-аут локальной индексации и поиска.
 
 Точка обнаружения и рабочий API находятся на `https://hobbyka.ru`. Перед изменением `HOBBYKA_BASE_URL` проверяйте, что выбранная среда возвращает JSON каталога.
 

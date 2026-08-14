@@ -1,6 +1,6 @@
 # Hobbyka CLI
 
-Официальный открытый самохостящийся пакет Hobbyka для Codex и других ИИ-агентов. Текущая разрабатываемая версия — `0.4.1`.
+Официальный открытый самохостящийся пакет Hobbyka для Codex и других ИИ-агентов. Текущая разрабатываемая версия — `0.5.0`.
 
 Пакет предоставляет CLI для поиска и подбора товаров, безопасной регистрации контакта и подготовки коммерческого предложения по серверным ценам Hobbyka.
 
@@ -28,7 +28,7 @@
 Перед установкой агент должен получить разрешение пользователя.
 
 ```bash
-codex plugin marketplace add https://github.com/mmasterkov/hobbyka-cli
+codex plugin marketplace add https://github.com/hobbyka-ru/hobbyka-cli
 codex plugin add hobbyka-cli@hobbyka-public
 ```
 
@@ -43,5 +43,19 @@ codex plugin add hobbyka-cli@hobbyka-public
 ```bash
 npm run check
 ```
+
+### Локальный поиск по фотографии
+
+Визуальное сопоставление выполняется на компьютере пользователя: фотография не загружается в Hobbyka. CLI передаёт на сайт только ID уверенно найденного товара, чтобы получить его актуальную полную карточку.
+
+Требуются [`uv`](https://docs.astral.sh/uv/) и разрешённый доступ к модели [`facebook/dinov3-vits16-pretrain-lvd1689m`](https://huggingface.co/facebook/dinov3-vits16-pretrain-lvd1689m). Веса DINOv3 имеют отдельную лицензию Meta и не входят в репозиторий.
+
+```bash
+hf auth login
+node plugins/hobbyka-cli/skills/hobbyka-catalog-agent/scripts/hobbyka-cli.mjs image-index build
+node plugins/hobbyka-cli/skills/hobbyka-catalog-agent/scripts/hobbyka-cli.mjs search --image /path/photo.jpg
+```
+
+Первый запуск скачивает Python-зависимости и примерно 86 МБ весов. Индекс хранится в `~/.cache/hobbyka-cli/image-search-v1`; путь можно изменить через `HOBBYKA_IMAGE_INDEX_DIR`. Для уже скачанной модели задайте `HOBBYKA_DINOV3_MODEL=/path/to/model`.
 
 Код пакета находится в [`plugins/hobbyka-cli`](plugins/hobbyka-cli). Каналом распространения служит репозиторий Hobbyka.
