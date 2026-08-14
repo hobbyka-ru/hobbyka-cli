@@ -4,10 +4,11 @@
 #   "numpy==2.2.6",
 #   "pillow==11.3.0",
 #   "torch==2.7.1",
-#   "transformers==4.56.2",
+#   "torchvision==0.22.1",
+#   "timm==1.0.28",
 # ]
 # ///
-"""Local DINOv3 index builder and exact cosine search for Hobbyka CLI."""
+"""Local SigLIP2-L index builder and exact cosine search for Hobbyka CLI."""
 
 from __future__ import annotations
 
@@ -23,9 +24,11 @@ import numpy as np
 import torch
 import torch.nn.functional as F
 from PIL import Image
-from transformers import AutoModel
+import timm
+from timm.data import create_transform, resolve_model_data_config
 
-MODEL_ID = "facebook/dinov3-vits16-pretrain-lvd1689m"
+MODEL_ID = "timm/vit_large_patch16_siglip_384.v2_webli"
+IMAGE_SIZE = 512
 MAX_DOWNLOAD_BYTES = 25 * 1024 * 1024
 
 
@@ -35,14 +38,6 @@ def device() -> torch.device:
     if torch.backends.mps.is_available():
         return torch.device("mps")
     return torch.device("cpu")
-
-
-def image_tensor(image: Image.Image) -> torch.Tensor:
-    image = image.convert("RGB").resize((224, 224), Image.Resampling.BICUBIC)
-    tensor = torch.from_numpy(np.asarray(image).copy()).permute(2, 0, 1).float().div_(255)
-    mean = torch.tensor([0.485, 0.456, 0.406])[:, None, None]
-    std = torch.tensor([0.229, 0.224, 0.225])[:, None, None]
-    return (tensor - mean) / std
 
 
 def download_image(url: str) -> Image.Image:
@@ -56,20 +51,21 @@ def download_image(url: str) -> Image.Image:
         data = response.read(MAX_DOWNLOAD_BYTES + 1)
     if len(data) > MAX_DOWNLOAD_BYTES:
         raise ValueError("image too large")
-    return Image.open(io.BytesIO(data))
+    return Image.open(io.BytesIO(data)).convert("RGB")
 
 
-def load_model(source: str) -> tuple[torch.nn.Module, torch.device]:
+def load_model(source: str) -> tuple[torch.nn.Module, torch.device, object]:
     target = device()
-    local = Path(source).expanduser().exists()
-    model = AutoModel.from_pretrained(source, local_files_only=local).to(target).eval()
-    return model, target
+    model = timm.create_model(f"hf_hub:{source}", pretrained=True, num_classes=0, img_size=IMAGE_SIZE).to(target).eval()
+    data_config = resolve_model_data_config(model)
+    data_config["input_size"] = (3, IMAGE_SIZE, IMAGE_SIZE)
+    return model, target, create_transform(**data_config, is_training=False)
 
 
-def embeddings(model: torch.nn.Module, target: torch.device, tensors: list[torch.Tensor]) -> np.ndarray:
+def embeddings(model: torch.nn.Module, target: torch.device, transform: object, images: list[Image.Image]) -> np.ndarray:
     with torch.inference_mode():
-        output = model(pixel_values=torch.stack(tensors).to(target))
-        vectors = F.normalize(output.pooler_output.float(), dim=-1)
+        output = model(torch.stack([transform(image.convert("RGB")) for image in images]).to(target))
+        vectors = F.normalize(output.float(), dim=-1)
     return vectors.cpu().numpy()
 
 
@@ -78,18 +74,18 @@ def build(args: argparse.Namespace) -> dict:
     products = payload.get("products")
     if not isinstance(products, list) or not products:
         raise ValueError("Каталог для индекса пуст.")
-    model, target = load_model(args.model)
-    batch_size = min(32, max(1, int(os.environ.get("HOBBYKA_VISION_BATCH_SIZE", "8"))))
+    model, target, transform = load_model(args.model)
+    batch_size = min(8, max(1, int(os.environ.get("HOBBYKA_VISION_BATCH_SIZE", "1"))))
     vectors: list[np.ndarray] = []
     product_ids: list[int] = []
-    pending: list[torch.Tensor] = []
+    pending: list[Image.Image] = []
     pending_ids: list[int] = []
     failures = 0
 
     def flush() -> None:
         if not pending:
             return
-        vectors.extend(embeddings(model, target, pending))
+        vectors.extend(embeddings(model, target, transform, pending))
         product_ids.extend(pending_ids)
         pending.clear()
         pending_ids.clear()
@@ -98,7 +94,7 @@ def build(args: argparse.Namespace) -> dict:
         product_id = int(product["product_id"])
         for url in product.get("image_urls") or []:
             try:
-                pending.append(image_tensor(download_image(url)))
+                pending.append(download_image(url))
                 pending_ids.append(product_id)
                 if len(pending) >= batch_size:
                     flush()
@@ -123,8 +119,8 @@ def search(args: argparse.Namespace) -> dict:
     product_ids = archive["product_ids"].astype(np.int64, copy=False)
     if matrix.ndim != 2 or len(matrix) != len(product_ids):
         raise ValueError("Индекс имеет неверный формат.")
-    model, target = load_model(args.model)
-    query = embeddings(model, target, [image_tensor(Image.open(args.image))])[0]
+    model, target, transform = load_model(args.model)
+    query = embeddings(model, target, transform, [Image.open(args.image).convert("RGB")])[0]
     scores = matrix @ query
     best: dict[int, float] = {}
     for product_id, score in zip(product_ids, scores):
@@ -142,11 +138,11 @@ def main() -> dict:
     subparsers = parser.add_subparsers(dest="command", required=True)
     build_parser = subparsers.add_parser("build")
     build_parser.add_argument("--index", required=True)
-    build_parser.add_argument("--model", default=os.environ.get("HOBBYKA_DINOV3_MODEL", MODEL_ID))
+    build_parser.add_argument("--model", default=os.environ.get("HOBBYKA_IMAGE_MODEL", MODEL_ID))
     search_parser = subparsers.add_parser("search")
     search_parser.add_argument("--index", required=True)
     search_parser.add_argument("--image", required=True)
-    search_parser.add_argument("--model", default=os.environ.get("HOBBYKA_DINOV3_MODEL", MODEL_ID))
+    search_parser.add_argument("--model", default=os.environ.get("HOBBYKA_IMAGE_MODEL", MODEL_ID))
     search_parser.add_argument("--top-k", type=int, default=20)
     args = parser.parse_args()
     return build(args) if args.command == "build" else search(args)

@@ -21,12 +21,13 @@ node plugins/hobbyka-cli/skills/hobbyka-catalog-agent/scripts/hobbyka-cli.mjs se
 ## Локальный поиск по изображению
 
 ```bash
-hf auth login # после принятия лицензии DINOv3
 node plugins/hobbyka-cli/skills/hobbyka-catalog-agent/scripts/hobbyka-cli.mjs image-index build
 node plugins/hobbyka-cli/skills/hobbyka-catalog-agent/scripts/hobbyka-cli.mjs search --image /path/photo.jpg
 ```
 
-Индекс и модель работают локально. Исходная фотография не передаётся в Hobbyka. При уверенном совпадении CLI запрашивает по ID актуальную полную карточку товара; при недостаточной уверенности возвращает top-20 кандидатов. Для запуска нужен `uv`. Веса Meta DINOv3 не распространяются вместе с плагином.
+Индекс и SigLIP2-L работают локально. Исходная фотография не передаётся в Hobbyka. При уверенном совпадении CLI запрашивает по ID актуальную полную карточку товара; при недостаточной уверенности возвращает top-20 кандидатов. Для запуска нужен `uv`. Веса модели доступны по лицензии Apache-2.0 и не распространяются вместе с плагином.
+
+После обновления с DINOv3 индекс нужно один раз перестроить: CLI проверяет модель в метаданных и не использует несовместимые признаки.
 
 ## Контракт CLI
 
@@ -64,7 +65,7 @@ JSON контакта: `company` и хотя бы одно из полей `phon
 - `HOBBYKA_STATE_FILE` — отдельный файл состояния для изолированной проверки;
 - `HOBBYKA_TIMEOUT_MS` — тайм-аут 1000–120000 мс.
 - `HOBBYKA_IMAGE_INDEX_DIR` — каталог локального визуального индекса;
-- `HOBBYKA_DINOV3_MODEL` — локальный путь либо Hugging Face ID модели;
+- `HOBBYKA_IMAGE_MODEL` — совместимый Hugging Face ID модели;
 - `HOBBYKA_VISION_TIMEOUT_MS` — тайм-аут локальной индексации и поиска.
 
 Точка обнаружения и рабочий API находятся на `https://hobbyka.ru`. Перед изменением `HOBBYKA_BASE_URL` проверяйте, что выбранная среда возвращает JSON каталога.

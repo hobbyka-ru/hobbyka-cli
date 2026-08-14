@@ -10,7 +10,7 @@ import { buildImageIndex, imageIndexStatus, ImageSearchError, searchImageIndex }
 const VERSION = '0.5.0'
 const DEFAULT_BASE_URL = 'https://hobbyka.ru'
 const DEFAULT_TIMEOUT_MS = 30_000
-const DEFAULT_DINOV3_MODEL = 'facebook/dinov3-vits16-pretrain-lvd1689m'
+const DEFAULT_IMAGE_MODEL = 'timm/vit_large_patch16_siglip_384.v2_webli'
 const AUTHORIZATION_PROMPT = 'Можно продолжить подбор без передачи данных, создать КП без аккаунта после сохранения контакта или войти через сайт, чтобы связать работу с личным кабинетом. Какой следующий шаг вам подходит?'
 const CONTACT_EXPLANATION = 'Сохранить контакт — записать компанию, телефон либо email, при желании имя, и интерес клиента. Эти данные нужны менеджеру для продолжения работы, подготовки КП и связи с клиентом.'
 
@@ -475,7 +475,7 @@ const main = async () => {
   if (command === 'image-index' && action === 'build') {
     const maxProducts = integer(flags['max-products'], 'max-products', { min: 1, max: 100000, fallback: 100000 })
     const imagesPerProduct = integer(flags['images-per-product'], 'images-per-product', { min: 1, max: 5, fallback: 2 })
-    const model = scalar(flags.model || process.env.HOBBYKA_DINOV3_MODEL || DEFAULT_DINOV3_MODEL, 'model', { required: true, max: 2048 })
+    const model = scalar(flags.model || process.env.HOBBYKA_IMAGE_MODEL || DEFAULT_IMAGE_MODEL, 'model', { required: true, max: 2048 })
     const catalog = await collectImageCatalog(baseUrl, profile.access_token, { maxProducts, imagesPerProduct })
     try {
       const imageSearch = await buildImageIndex({ products: catalog.products, baseUrl, catalogRevision: catalog.revision, model })
@@ -617,7 +617,7 @@ const main = async () => {
       const limit = integer(flags.limit, 'limit', { min: 1, max: 20, fallback: 10 })
       const minScore = decimal(flags['min-score'], 'min-score', { fallback: 0.90 })
       const minMargin = decimal(flags['min-margin'], 'min-margin', { min: 0, fallback: 0.05 })
-      const model = scalar(flags.model || process.env.HOBBYKA_DINOV3_MODEL || DEFAULT_DINOV3_MODEL, 'model', { required: true, max: 2048 })
+      const model = scalar(flags.model || process.env.HOBBYKA_IMAGE_MODEL || DEFAULT_IMAGE_MODEL, 'model', { required: true, max: 2048 })
       let local
       try { local = await searchImageIndex({ image, model, topK: 20 }) } catch (error) {
         if (error instanceof ImageSearchError) throw new CliError(error.code, error.message, 5, error.details)
@@ -632,7 +632,7 @@ const main = async () => {
       return {
         ok: true, command, data: product || { data: { items: candidates.map((candidate) => candidate.product) }, meta: { count: candidates.length } },
         result: { product: product ? serverProfile(product) : null },
-        match: { status: confident ? 'confident' : 'ambiguous', confidence: first.score, method: 'dinov3', top1_margin: local.top1_margin, thresholds: { min_score: minScore, min_margin: minMargin } },
+        match: { status: confident ? 'confident' : 'ambiguous', confidence: first.score, method: 'siglip2_l', top1_margin: local.top1_margin, thresholds: { min_score: minScore, min_margin: minMargin } },
         candidates, provenance: local.provenance, guidance: buildGuidance(profile, { command })
       }
     }

@@ -31,7 +31,7 @@ const cli = await readFile(path.join(pluginRoot, 'skills/hobbyka-catalog-agent/s
 if (!cli.includes("const DEFAULT_BASE_URL = 'https://hobbyka.ru'")) throw new Error('Некорректная публичная среда CLI')
 if (!cli.includes(`const VERSION = '${expectedVersion}'`)) throw new Error('Версия CLI не совпадает с версией плагина')
 if (!cli.includes('const buildGuidance =') || !cli.includes('feature_groups: featureGroups') || !cli.includes('server_capabilities: access.capabilities')) throw new Error('В CLI нет универсальной карты guidance')
-if (!cli.includes("method: 'dinov3'") || !cli.includes("command === 'image-index'")) throw new Error('В CLI нет локального поиска по изображению')
+if (!cli.includes("method: 'siglip2_l'") || !cli.includes("command === 'image-index'")) throw new Error('В CLI нет локального поиска по изображению')
 
 const visit = async (directory) => {
   for (const item of await readdir(directory, { withFileTypes: true })) {

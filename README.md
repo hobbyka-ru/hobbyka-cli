@@ -48,14 +48,15 @@ npm run check
 
 Визуальное сопоставление выполняется на компьютере пользователя: фотография не загружается в Hobbyka. CLI передаёт на сайт только ID уверенно найденного товара, чтобы получить его актуальную полную карточку.
 
-Требуются [`uv`](https://docs.astral.sh/uv/) и разрешённый доступ к модели [`facebook/dinov3-vits16-pretrain-lvd1689m`](https://huggingface.co/facebook/dinov3-vits16-pretrain-lvd1689m). Веса DINOv3 имеют отдельную лицензию Meta и не входят в репозиторий.
+Требуются [`uv`](https://docs.astral.sh/uv/) и модель [`timm/vit_large_patch16_siglip_384.v2_webli`](https://huggingface.co/timm/vit_large_patch16_siglip_384.v2_webli). Веса SigLIP2-L доступны по лицензии Apache-2.0 и не входят в репозиторий.
 
 ```bash
-hf auth login
 node plugins/hobbyka-cli/skills/hobbyka-catalog-agent/scripts/hobbyka-cli.mjs image-index build
 node plugins/hobbyka-cli/skills/hobbyka-catalog-agent/scripts/hobbyka-cli.mjs search --image /path/photo.jpg
 ```
 
-Первый запуск скачивает Python-зависимости и примерно 86 МБ весов. Индекс хранится в `~/.cache/hobbyka-cli/image-search-v1`; путь можно изменить через `HOBBYKA_IMAGE_INDEX_DIR`. Для уже скачанной модели задайте `HOBBYKA_DINOV3_MODEL=/path/to/model`.
+Первый запуск скачивает Python-зависимости и примерно 1,3 ГБ весов. Индекс хранится в `~/.cache/hobbyka-cli/image-search-v1`; путь можно изменить через `HOBBYKA_IMAGE_INDEX_DIR`. Другой совместимый Hugging Face ID можно задать через `HOBBYKA_IMAGE_MODEL`.
+
+После обновления с DINOv3 перестройте индекс командой `image-index build`: признаки моделей несовместимы, и CLI не станет смешивать их.
 
 Код пакета находится в [`plugins/hobbyka-cli`](plugins/hobbyka-cli). Каналом распространения служит репозиторий Hobbyka.

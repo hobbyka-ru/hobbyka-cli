@@ -35,7 +35,7 @@ test('Hobbyka CLI сообщает версию текущего публичн�
   assert.equal(JSON.parse(result.stdout).version, packageManifest.version)
 })
 
-test('локальный DINOv3-поиск строит индекс, возвращает полную карточку и не отправляет фотографию', async (t) => {
+test('локальный SigLIP2-L-поиск строит индекс, возвращает полную карточку и не отправляет фотографию', async (t) => {
   const requests = []
   const server = createServer((request, response) => {
     requests.push(request.url)
@@ -96,13 +96,14 @@ if (command === 'build') {
   const built = JSON.parse((await run(['image-index', 'build', '--max-products', '2'], { env })).stdout)
   assert.equal(built.image_search.products, 2)
   assert.equal(built.image_search.images, 2)
+  assert.equal(built.image_search.model, 'timm/vit_large_patch16_siglip_384.v2_webli')
   assert.deepEqual(JSON.parse(await readFile(capture, 'utf8')).products.map((product) => product.product_id), [321, 654])
   const after = JSON.parse((await run(['image-index', 'status'], { env })).stdout)
   assert.equal(after.image_search.ready, true)
 
   const found = JSON.parse((await run(['search', '--image', image], { env })).stdout)
   assert.equal(found.match.status, 'confident')
-  assert.equal(found.match.method, 'dinov3')
+  assert.equal(found.match.method, 'siglip2_l')
   assert.equal(found.result.product.id, 321)
   assert.equal(found.result.product.description, 'Полная карточка')
   assert.equal(found.provenance.local, true)
