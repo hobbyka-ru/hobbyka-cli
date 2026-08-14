@@ -1,7 +1,7 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
 import { spawn } from 'node:child_process'
-import { mkdtemp, readFile, stat } from 'node:fs/promises'
+import { chmod, mkdtemp, readFile, stat, writeFile } from 'node:fs/promises'
 import { createServer } from 'node:http'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
@@ -33,6 +33,88 @@ test('Hobbyka CLI сообщает версию текущего публичн�
   const result = await run(['version'], { env: {} })
   assert.equal(result.code, 0)
   assert.equal(JSON.parse(result.stdout).version, packageManifest.version)
+})
+
+test('локальный SigLIP2-L-поиск строит индекс, возвращает полную карточку и не отправляет фотографию', async (t) => {
+  const requests = []
+  const server = createServer((request, response) => {
+    requests.push(request.url)
+    response.setHeader('Content-Type', 'application/json')
+    if (request.url?.startsWith('/api/ai/v1/catalog/products/321/')) {
+      response.end(JSON.stringify({ data: { id: 321, name: 'Скамейка Тест', description: 'Полная карточка', images: ['https://example.test/321.jpg'], price: { value: 1000, currency: 'RUB' } }, meta: {} }))
+      return
+    }
+    if (request.url?.startsWith('/api/ai/v1/catalog/products/')) {
+      response.end(JSON.stringify({
+        data: { items: [
+          { id: 321, name: 'Скамейка Тест', images: ['https://example.test/321.jpg'], updated_at: '2026-08-14T00:00:00Z' },
+          { id: 654, name: 'Урна Тест', images: ['https://example.test/654.jpg'], updated_at: '2026-08-14T00:00:00Z' }
+        ] },
+        meta: { count: 2, has_more: false }
+      }))
+      return
+    }
+    response.statusCode = 404
+    response.end(JSON.stringify({ error: { code: 'not_found', message: 'not found' } }))
+  })
+  await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve))
+  t.after(() => server.close())
+
+  const directory = await mkdtemp(path.join(tmpdir(), 'hobbyka-cli-image-'))
+  const runner = path.join(directory, 'vision-runner.mjs')
+  const capture = path.join(directory, 'vision-input.json')
+  await writeFile(runner, `#!/usr/bin/env node
+import { readFileSync, writeFileSync } from 'node:fs'
+import path from 'node:path'
+const [command, ...args] = process.argv.slice(2)
+const flag = (name) => args[args.indexOf(name) + 1]
+if (command === 'build') {
+  const input = readFileSync(0, 'utf8')
+  writeFileSync(process.env.VISION_CAPTURE, input)
+  writeFileSync(flag('--index'), 'fake-index')
+  process.stdout.write(JSON.stringify({ ok: true, model: flag('--model'), device: 'test', images: 2, product_ids: [321, 654], download_failures: 0 }))
+} else {
+  const ambiguous = path.basename(flag('--image')).startsWith('ambiguous')
+  process.stdout.write(JSON.stringify({ ok: true, model: flag('--model'), candidates: ambiguous ? [{ product_id: 321, score: 0.85 }, { product_id: 654, score: 0.84 }] : [{ product_id: 321, score: 0.96 }, { product_id: 654, score: 0.70 }], top1_margin: ambiguous ? 0.01 : 0.26 }))
+}
+`)
+  await chmod(runner, 0o700)
+  const image = path.join(directory, 'query.jpg')
+  const ambiguousImage = path.join(directory, 'ambiguous.jpg')
+  await Promise.all([writeFile(image, 'image'), writeFile(ambiguousImage, 'image')])
+  const env = {
+    PATH: process.env.PATH,
+    HOBBYKA_BASE_URL: `http://127.0.0.1:${server.address().port}`,
+    HOBBYKA_STATE_FILE: path.join(directory, 'state.json'),
+    HOBBYKA_IMAGE_INDEX_DIR: path.join(directory, 'index'),
+    HOBBYKA_VISION_RUNNER: runner,
+    VISION_CAPTURE: capture
+  }
+
+  const before = JSON.parse((await run(['image-index', 'status'], { env })).stdout)
+  assert.equal(before.image_search.ready, false)
+  const built = JSON.parse((await run(['image-index', 'build', '--max-products', '2'], { env })).stdout)
+  assert.equal(built.image_search.products, 2)
+  assert.equal(built.image_search.images, 2)
+  assert.equal(built.image_search.model, 'timm/vit_large_patch16_siglip_384.v2_webli')
+  assert.deepEqual(JSON.parse(await readFile(capture, 'utf8')).products.map((product) => product.product_id), [321, 654])
+  const after = JSON.parse((await run(['image-index', 'status'], { env })).stdout)
+  assert.equal(after.image_search.ready, true)
+
+  const found = JSON.parse((await run(['search', '--image', image], { env })).stdout)
+  assert.equal(found.match.status, 'confident')
+  assert.equal(found.match.method, 'siglip2_l')
+  assert.equal(found.result.product.id, 321)
+  assert.equal(found.result.product.description, 'Полная карточка')
+  assert.equal(found.provenance.local, true)
+  assert.equal(found.candidates[0].product.id, 321)
+
+  const ambiguous = JSON.parse((await run(['search', '--image', ambiguousImage], { env })).stdout)
+  assert.equal(ambiguous.match.status, 'ambiguous')
+  assert.equal(ambiguous.result.product, null)
+  assert.deepEqual(ambiguous.data.data.items.map((product) => product.id), [321, 654])
+  assert.equal(requests.some((url) => url.includes('query.jpg') || url.includes('ambiguous.jpg')), false)
+  assert.equal(requests.filter((url) => url.startsWith('/api/ai/v1/catalog/products/321/')).length, 1)
 })
 
 test('Hobbyka CLI проходит контактный шлюз и создаёт КП без утечки контакта', async (t) => {

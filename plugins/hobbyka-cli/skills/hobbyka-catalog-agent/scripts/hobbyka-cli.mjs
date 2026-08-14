@@ -1,14 +1,16 @@
 #!/usr/bin/env node
 
-import { randomUUID } from 'node:crypto'
+import { createHash, randomUUID } from 'node:crypto'
 import { chmod, mkdir, readFile, rename, writeFile } from 'node:fs/promises'
 import { homedir } from 'node:os'
 import path from 'node:path'
 import process from 'node:process'
+import { buildImageIndex, imageIndexStatus, ImageSearchError, searchImageIndex } from './image-search.mjs'
 
-const VERSION = '0.4.1'
+const VERSION = '0.5.0'
 const DEFAULT_BASE_URL = 'https://hobbyka.ru'
 const DEFAULT_TIMEOUT_MS = 30_000
+const DEFAULT_IMAGE_MODEL = 'timm/vit_large_patch16_siglip_384.v2_webli'
 const AUTHORIZATION_PROMPT = 'Можно продолжить подбор без передачи данных, создать КП без аккаунта после сохранения контакта или войти через сайт, чтобы связать работу с личным кабинетом. Какой следующий шаг вам подходит?'
 const CONTACT_EXPLANATION = 'Сохранить контакт — записать компанию, телефон либо email, при желании имя, и интерес клиента. Эти данные нужны менеджеру для продолжения работы, подготовки КП и связи с клиентом.'
 
@@ -62,6 +64,15 @@ const integer = (value, name, { min = 1, max = Number.MAX_SAFE_INTEGER, fallback
   const result = Number(value)
   if (!Number.isInteger(result) || result < min || result > max) {
     throw new CliError('invalid_argument', `${name} должен быть целым числом от ${min} до ${max}.`, 2, { field: name })
+  }
+  return result
+}
+
+const decimal = (value, name, { min = -1, max = 1, fallback } = {}) => {
+  if ((value === undefined || value === '') && fallback !== undefined) return fallback
+  const result = Number(value)
+  if (!Number.isFinite(result) || result < min || result > max) {
+    throw new CliError('invalid_argument', `${name} должен быть числом от ${min} до ${max}.`, 2, { field: name })
   }
   return result
 }
@@ -143,6 +154,7 @@ const nextStepFor = (command, { authenticated, contactRegistered, outcome }) => 
   }
   const steps = {
     search: { action: 'review_catalog_result', explanation: 'Покажите найденные товары и уточните, нужно ли сравнение, карточка или переход к КП.' },
+    'image-index build': { action: 'search_by_image', explanation: 'Локальный индекс готов. Передайте фотографию в search --image.' },
     product: { action: 'review_product', explanation: 'Объясните карточку товара и уточните, нужно ли сравнение или добавление в КП.' },
     'contacts set': { action: 'continue_protected_goal', explanation: 'Контакт сохранён. Вернитесь к исходной цели и запросите недостающие параметры.' },
     'auth login': { action: 'complete_site_authorization', explanation: 'Покажите ссылку входа и дождитесь самостоятельного подтверждения на сайте.' },
@@ -179,7 +191,7 @@ const buildGuidance = (profile, { command = 'help', outcome = 'ready' } = {}) =>
     ? ['offer create', 'offer status', 'offer list', 'offer revise', 'offer archive']
     : contactRegistered ? ['offer create', 'offer status'] : []
   const featureGroups = [
-    { id: 'catalog', available: true, summary: 'Поиск, сравнение и чтение карточек товаров.', actions: ['search', 'product'] },
+    { id: 'catalog', available: true, summary: 'Текстовый и локальный визуальный поиск, сравнение и чтение карточек товаров.', actions: ['search', 'product', 'image-index build', 'image-index status'] },
     { id: 'access', available: true, summary: 'Вход через сайт, проверка режима и безопасное сохранение контакта.', actions: accessActions, requirement: accessActions.includes('contacts set') ? 'Сохранение контакта требует согласия пользователя.' : null },
     { id: 'commercial_offers', available: offerActions.length > 0, summary: 'Создание и ведение коммерческих предложений.', actions: offerActions, requirement: offerActions.length ? null : 'Вход через сайт или сохранённый контакт.' },
     { id: 'orders', available: access.authenticated, summary: 'Создание, просмотр, изменение и отмена своих заказов.', actions: access.authenticated ? ['order create', 'order list', 'order get', 'order update', 'order cancel'] : [], requirement: access.authenticated ? null : 'Вход через сайт Hobbyka.' },
@@ -340,6 +352,36 @@ const replayPendingRequest = async (baseUrl, profile) => {
   return { command: pending.command, data }
 }
 
+const collectImageCatalog = async (baseUrl, token, { maxProducts, imagesPerProduct }) => {
+  const products = []
+  const seenProducts = new Set()
+  const seenCursors = new Set()
+  let cursor = ''
+  while (products.length < maxProducts) {
+    const route = `/api/ai/v1/catalog/products/?${buildQuery([
+      ['limit', Math.min(100, maxProducts - products.length)], ['cursor', cursor], ['agent', 'hobbyka-cli-image-index']
+    ])}`
+    const payload = await request(baseUrl, route, { token })
+    const items = payload?.data?.items ?? payload?.items
+    if (!Array.isArray(items)) throw new CliError('invalid_catalog_response', 'Hobbyka вернул некорректную страницу каталога.', 5)
+    for (const item of items) {
+      if (!Number.isInteger(item?.id) || seenProducts.has(item.id) || !Array.isArray(item.images) || item.images.length === 0) continue
+      seenProducts.add(item.id)
+      products.push({ ...item, images: item.images.slice(0, imagesPerProduct) })
+      if (products.length >= maxProducts) break
+    }
+    const meta = payload?.meta ?? payload?.data?.meta ?? {}
+    if (!meta.has_more) break
+    const nextCursor = scalar(meta.next_cursor, 'next_cursor', { required: true, max: 2048 })
+    if (seenCursors.has(nextCursor)) throw new CliError('catalog_pagination_loop', 'Hobbyka повторил курсор каталога.', 5)
+    seenCursors.add(nextCursor)
+    cursor = nextCursor
+  }
+  if (products.length === 0) throw new CliError('empty_catalog', 'В каталоге нет товаров с изображениями.', 5)
+  const revision = createHash('sha256').update(JSON.stringify(products.map((product) => [product.id, product.updated_at, product.images]))).digest('hex')
+  return { products, revision }
+}
+
 const buildQuery = (entries) => {
   const query = new URLSearchParams()
   for (const [key, value] of entries) if (value !== undefined && value !== '') query.set(key, String(value))
@@ -371,6 +413,9 @@ const help = () => ({
   guidance: buildGuidance({ first_request_completed: false, mode: 'public' }),
   commands: [
     'search --query <text> [--limit 10] [--section-code <code>] [--recommendation-profile <id>]',
+    'search --image <path> [--limit 10] [--min-score 0.90] [--min-margin 0.05]',
+    'image-index build [--max-products <n>] [--images-per-product 2] [--model <path-or-hf-id>]',
+    'image-index status',
     'product --id <id> [--recommendation-profile <id>]',
     'contacts set --stdin',
     'contacts status',
@@ -418,7 +463,26 @@ const main = async () => {
       contact: contactStatus(profile),
       access: accessStatus(profile),
       partner: partnerStatus(profile),
+      image_search: await imageIndexStatus(),
       guidance: buildGuidance(profile, { command })
+    }
+  }
+
+  if (command === 'image-index' && action === 'status') {
+    return { ok: true, command: 'image-index status', image_search: await imageIndexStatus(), guidance: buildGuidance(profile, { command: 'image-index status' }) }
+  }
+
+  if (command === 'image-index' && action === 'build') {
+    const maxProducts = integer(flags['max-products'], 'max-products', { min: 1, max: 100000, fallback: 100000 })
+    const imagesPerProduct = integer(flags['images-per-product'], 'images-per-product', { min: 1, max: 5, fallback: 2 })
+    const model = scalar(flags.model || process.env.HOBBYKA_IMAGE_MODEL || DEFAULT_IMAGE_MODEL, 'model', { required: true, max: 2048 })
+    const catalog = await collectImageCatalog(baseUrl, profile.access_token, { maxProducts, imagesPerProduct })
+    try {
+      const imageSearch = await buildImageIndex({ products: catalog.products, baseUrl, catalogRevision: catalog.revision, model })
+      return { ok: true, command: 'image-index build', image_search: imageSearch, guidance: buildGuidance(profile, { command: 'image-index build' }) }
+    } catch (error) {
+      if (error instanceof ImageSearchError) throw new CliError(error.code, error.message, 5, error.details)
+      throw error
     }
   }
 
@@ -546,6 +610,32 @@ const main = async () => {
   }
 
   if (command === 'search') {
+    if (flags.image) {
+      const query = scalar(flags.query ?? flags.q, 'query', { max: 500 })
+      if (query) throw new CliError('unsupported_argument', 'Локальный поиск принимает либо --image, либо --query.', 2)
+      const image = path.resolve(scalar(flags.image, 'image', { required: true, max: 4096 }))
+      const limit = integer(flags.limit, 'limit', { min: 1, max: 20, fallback: 10 })
+      const minScore = decimal(flags['min-score'], 'min-score', { fallback: 0.90 })
+      const minMargin = decimal(flags['min-margin'], 'min-margin', { min: 0, fallback: 0.05 })
+      const model = scalar(flags.model || process.env.HOBBYKA_IMAGE_MODEL || DEFAULT_IMAGE_MODEL, 'model', { required: true, max: 2048 })
+      let local
+      try { local = await searchImageIndex({ image, model, topK: 20 }) } catch (error) {
+        if (error instanceof ImageSearchError) throw new CliError(error.code, error.message, 5, error.details)
+        throw error
+      }
+      const first = local.candidates[0]
+      if (!first) throw new CliError('empty_image_index', 'Локальный индекс не вернул кандидатов.', 5)
+      const confident = first.score >= minScore && local.top1_margin >= minMargin
+      const productRoute = `/api/ai/v1/catalog/products/${first.product_id}/?agent=hobbyka-cli`
+      const product = confident ? await request(baseUrl, productRoute, { token: profile.access_token }) : null
+      const candidates = local.candidates.slice(0, limit)
+      return {
+        ok: true, command, data: product || { data: { items: candidates.map((candidate) => candidate.product) }, meta: { count: candidates.length } },
+        result: { product: product ? serverProfile(product) : null },
+        match: { status: confident ? 'confident' : 'ambiguous', confidence: first.score, method: 'siglip2_l', top1_margin: local.top1_margin, thresholds: { min_score: minScore, min_margin: minMargin } },
+        candidates, provenance: local.provenance, guidance: buildGuidance(profile, { command })
+      }
+    }
     const query = scalar(flags.query ?? flags.q, 'query', { max: 500 })
     const limit = integer(flags.limit, 'limit', { min: 1, max: 100, fallback: 10 })
     const sectionId = flags['section-id'] === undefined ? undefined : integer(flags['section-id'], 'section-id')
