@@ -25,7 +25,8 @@ test('Hobbyka CLI по умолчанию использует основной 
   const result = await run(['config'], { env: { HOBBYKA_STATE_FILE: path.join(directory, 'state.json') } })
   assert.equal(result.code, 0)
   assert.equal(JSON.parse(result.stdout).base_url, 'https://hobbyka.ru')
-  assert.deepEqual(JSON.parse(result.stdout).guidance.feature_groups.map((group) => group.id), ['catalog', 'access', 'commercial_offers', 'orders', 'admin_offers', 'admin_orders', 'cli_info'])
+  assert.deepEqual(JSON.parse(result.stdout).guidance.feature_groups.map((group) => group.id), ['catalog', 'design_materials', 'access', 'commercial_offers', 'orders', 'admin_offers', 'admin_orders', 'cli_info'])
+  assert.deepEqual(JSON.parse(result.stdout).guidance.feature_groups.find((group) => group.id === 'design_materials').actions, ['materials request'])
   assert.deepEqual(JSON.parse(result.stdout).guidance.feature_groups.find((group) => group.id === 'access').actions, ['auth status', 'contacts status', 'auth login', 'contacts set'])
 })
 
@@ -123,7 +124,7 @@ test('Hobbyka CLI проходит контактный шлюз и создаё
     const chunks = []
     for await (const chunk of request) chunks.push(chunk)
     const body = chunks.length ? JSON.parse(Buffer.concat(chunks).toString('utf8')) : null
-    requests.push({ method: request.method, url: request.url, authorization: request.headers.authorization, body })
+    requests.push({ method: request.method, url: request.url, authorization: request.headers.authorization, idempotency: request.headers['idempotency-key'], body })
     response.setHeader('Content-Type', 'application/json')
     if (request.url === '/api/ai/v1/cli/contacts/' && request.method === 'POST') {
       response.statusCode = 201
@@ -145,6 +146,11 @@ test('Hobbyka CLI проходит контактный шлюз и создаё
     if (request.url === '/api/ai/v1/commercial-offers/' && request.method === 'POST') {
       response.statusCode = 201
       response.end(JSON.stringify({ data: { public_id: 'a'.repeat(40), status: 'ready', total: 2000, pdf_url: 'https://example.test/offer.pdf' }, meta: {} }))
+      return
+    }
+    if (request.url === '/api/ai/v1/material-requests/' && request.method === 'POST') {
+      response.statusCode = 201
+      response.end(JSON.stringify({ data: { request_id: 'material-test-1', status: 'submitted', request_type: 'design_materials', product: { id: 321, name: 'Скамейка Тест', canonical_url: 'https://hobbyka.test/product/321/' }, message: 'Запрос передан менеджеру Hobbyka.' }, meta: {} }))
       return
     }
     response.statusCode = 404
@@ -186,6 +192,22 @@ test('Hobbyka CLI проходит контактный шлюз и создаё
   assert.equal(JSON.parse(publicProduct.stdout).contact_gate.status, 'required')
   assert.equal(requests.length, 3, 'публичные чтения должны быть доступны для полного первого ответа')
 
+  const materialContact = { product_id: 321, full_name: 'Секретное Имя', company: 'ООО Материалы', phone: '+7 999 000-00-00', email: 'materials@example.test', comment: 'Нужны BIM-файлы', personal_data_consent: true }
+  const materials = await run(['materials', 'request', '--stdin', '--idempotency-key', 'material-test-key'], { env, input: JSON.stringify(materialContact) })
+  assert.equal(materials.code, 0)
+  assert.equal(JSON.parse(materials.stdout).data.data.status, 'submitted')
+  assert.equal(JSON.parse(materials.stdout).guidance.recommended_next_step.action, 'confirm_material_request')
+  assert.doesNotMatch(materials.stdout + materials.stderr, /Секретное Имя|ООО Материалы|materials@example\.test|999 000/u)
+  const materialRequest = requests.find((entry) => entry.url === '/api/ai/v1/material-requests/')
+  assert.equal(materialRequest.idempotency, 'material-test-key')
+  assert.equal(materialRequest.body.agent, 'hobbyka-cli')
+  assert.equal(materialRequest.body.personal_data_consent, true)
+
+  const rejectedMaterials = await run(['materials', 'request', '--stdin'], { env, input: JSON.stringify({ ...materialContact, personal_data_consent: false }) })
+  assert.equal(rejectedMaterials.code, 2)
+  assert.equal(JSON.parse(rejectedMaterials.stderr).error.code, 'consent_required')
+  assert.equal(requests.filter((entry) => entry.url === '/api/ai/v1/material-requests/').length, 1)
+
   const blockedOffer = await run(['offer', 'create', '--items', '321:2'], { env })
   assert.equal(blockedOffer.code, 3)
   const blockedError = JSON.parse(blockedOffer.stderr).error
@@ -193,7 +215,7 @@ test('Hobbyka CLI проходит контактный шлюз и создаё
   assert.equal(blockedError.details.partner_login.next_command, 'node scripts/hobbyka-cli.mjs auth login')
   assert.equal(blockedError.details.guidance.unlock_paths[1].id, 'contact_registration')
   assert.equal(blockedError.details.guidance.recommended_next_step.action, 'resolve_requirement')
-  assert.equal(requests.length, 3, 'защищённая операция не должна доходить до сервера')
+  assert.equal(requests.length, 4, 'защищённая операция не должна доходить до сервера')
 
   const secretContact = { company: 'ООО Секрет', name: 'Иван', email: 'secret@example.test' }
   const registered = await run(['contacts', 'set', '--stdin'], { env, input: JSON.stringify(secretContact) })

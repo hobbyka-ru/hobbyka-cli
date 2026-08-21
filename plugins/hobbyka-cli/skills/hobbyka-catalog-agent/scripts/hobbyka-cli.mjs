@@ -7,7 +7,7 @@ import path from 'node:path'
 import process from 'node:process'
 import { buildImageIndex, imageIndexStatus, ImageSearchError, searchImageIndex } from './image-search.mjs'
 
-const VERSION = '0.5.0'
+const VERSION = '0.6.0'
 const DEFAULT_BASE_URL = 'https://hobbyka.ru'
 const DEFAULT_TIMEOUT_MS = 30_000
 const DEFAULT_IMAGE_MODEL = 'timm/vit_large_patch16_siglip_384.v2_webli'
@@ -156,6 +156,7 @@ const nextStepFor = (command, { authenticated, contactRegistered, outcome }) => 
     search: { action: 'review_catalog_result', explanation: 'Покажите найденные товары и уточните, нужно ли сравнение, карточка или переход к КП.' },
     'image-index build': { action: 'search_by_image', explanation: 'Локальный индекс готов. Передайте фотографию в search --image.' },
     product: { action: 'review_product', explanation: 'Объясните карточку товара и уточните, нужно ли сравнение или добавление в КП.' },
+    'materials request': { action: 'confirm_material_request', explanation: 'Сообщите, что заявка передана менеджеру, и покажите товар и идентификатор запроса из ответа.' },
     'contacts set': { action: 'continue_protected_goal', explanation: 'Контакт сохранён. Вернитесь к исходной цели и запросите недостающие параметры.' },
     'auth login': { action: 'complete_site_authorization', explanation: 'Покажите ссылку входа и дождитесь самостоятельного подтверждения на сайте.' },
     'auth complete': { action: 'explain_authorized_access', explanation: 'Сравните повторённый запрос с публичным результатом и объясните открывшиеся функции.' },
@@ -192,6 +193,7 @@ const buildGuidance = (profile, { command = 'help', outcome = 'ready' } = {}) =>
     : contactRegistered ? ['offer create', 'offer status'] : []
   const featureGroups = [
     { id: 'catalog', available: true, summary: 'Текстовый и локальный визуальный поиск, сравнение и чтение карточек товаров.', actions: ['search', 'product', 'image-index build', 'image-index status'] },
+    { id: 'design_materials', available: true, summary: 'Запрос менеджеру на чертежи, 2D-, 3D-, BIM- и другие материалы по товару.', actions: ['materials request'], requirement: 'ФИО, телефон, email и явное согласие на обработку персональных данных.' },
     { id: 'access', available: true, summary: 'Вход через сайт, проверка режима и безопасное сохранение контакта.', actions: accessActions, requirement: accessActions.includes('contacts set') ? 'Сохранение контакта требует согласия пользователя.' : null },
     { id: 'commercial_offers', available: offerActions.length > 0, summary: 'Создание и ведение коммерческих предложений.', actions: offerActions, requirement: offerActions.length ? null : 'Вход через сайт или сохранённый контакт.' },
     { id: 'orders', available: access.authenticated, summary: 'Создание, просмотр, изменение и отмена своих заказов.', actions: access.authenticated ? ['order create', 'order list', 'order get', 'order update', 'order cancel'] : [], requirement: access.authenticated ? null : 'Вход через сайт Hobbyka.' },
@@ -417,6 +419,7 @@ const help = () => ({
     'image-index build [--max-products <n>] [--images-per-product 2] [--model <path-or-hf-id>]',
     'image-index status',
     'product --id <id> [--recommendation-profile <id>]',
+    'materials request --stdin [--idempotency-key <key>]',
     'contacts set --stdin',
     'contacts status',
     'contacts clear',
@@ -654,6 +657,26 @@ const main = async () => {
     const route = `/api/ai/v1/catalog/products/${id}/?agent=hobbyka-cli`
     const data = await request(baseUrl, route, { token: profile.access_token })
     return completeFirstRequest(state, baseUrl, profile, { ok: true, command, data, recommendation: recommendation(flags) }, { command, route })
+  }
+
+  if (command === 'materials' && action === 'request') {
+    if (!flags.stdin) throw new CliError('stdin_required', 'Передайте данные формы как JSON через стандартный ввод и флаг --stdin.', 2)
+    const input = await readStdinJson('invalid_material_request_json', 'Ожидается JSON-объект заявки на материалы в стандартном вводе.')
+    const productId = integer(input.product_id, 'product_id')
+    const fullName = scalar(input.full_name, 'full_name', { required: true, max: 255 })
+    const company = scalar(input.company, 'company', { max: 255 })
+    const phone = scalar(input.phone, 'phone', { required: true, max: 64 })
+    const email = scalar(input.email, 'email', { required: true, max: 254 })
+    const comment = scalar(input.comment, 'comment', { max: 2000 })
+    if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) throw new CliError('invalid_email', 'Некорректный email.', 2)
+    if (input.personal_data_consent !== true) throw new CliError('consent_required', 'Для отправки заявки требуется явное согласие на обработку персональных данных.', 2)
+    const data = await request(baseUrl, '/api/ai/v1/material-requests/', {
+      method: 'POST',
+      body: { product_id: productId, full_name: fullName, company: company || undefined, phone, email, comment: comment || undefined, personal_data_consent: true, agent: 'hobbyka-cli' },
+      token: profile.access_token,
+      idempotencyKey: scalar(flags['idempotency-key'] || input.idempotency_key, 'idempotency-key', { max: 128 }) || randomUUID()
+    })
+    return { ok: true, command: 'materials request', data, guidance: buildGuidance(profile, { command: 'materials request' }) }
   }
 
   if (command === 'offer' && action === 'create') {
