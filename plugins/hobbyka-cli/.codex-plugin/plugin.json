@@ -1,7 +1,7 @@
 {
   "name": "hobbyka-cli",
-  "version": "0.5.0",
-  "description": "Find and compare Hobbyka benches, bins, lighting and other products, check current prices, and prepare commercial offers through the official Hobbyka CLI.",
+  "version": "0.6.0",
+  "description": "Find and compare Hobbyka products, check current prices, request design materials, and prepare commercial offers through the official Hobbyka CLI.",
   "author": {
     "name": "Hobbyka",
     "url": "https://hobbyka.ru/ai/cli/"
@@ -13,15 +13,16 @@
   "skills": "./skills/",
   "interface": {
     "displayName": "Hobbyka CLI",
-    "shortDescription": "Подбор товаров и КП Hobbyka через CLI",
-    "longDescription": "Официальный CLI-интерфейс Hobbyka для поиска товаров, подготовки коммерческих предложений и работы партнёров с заказами по серверным ценам.",
+    "shortDescription": "Товары, материалы и КП Hobbyka",
+    "longDescription": "Официальный CLI-интерфейс Hobbyka для поиска товаров, запроса проектных материалов, подготовки коммерческих предложений и работы партнёров с заказами по серверным ценам.",
     "developerName": "Hobbyka",
     "category": "Productivity",
     "websiteURL": "https://hobbyka.ru/ai/cli/",
-    "capabilities": ["Catalog search", "Local image search", "Product details", "Commercial offers", "Partner orders"],
+    "capabilities": ["Catalog search", "Local image search", "Product details", "Design material requests", "Commercial offers", "Partner orders"],
     "defaultPrompt": [
       "Подбери скамейки Hobbyka для парка.",
       "Уточни варианты товара Hobbyka.",
+      "Запроси BIM-материалы для товара Hobbyka.",
       "Подготовь КП Hobbyka по выбранным товарам."
     ]
   }
