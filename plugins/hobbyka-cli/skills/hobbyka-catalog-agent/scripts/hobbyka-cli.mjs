@@ -7,7 +7,7 @@ import path from 'node:path'
 import process from 'node:process'
 import { buildImageIndex, imageIndexStatus, ImageSearchError, searchImageIndex } from './image-search.mjs'
 
-const VERSION = '0.6.0'
+const VERSION = '0.6.1'
 const DEFAULT_BASE_URL = 'https://hobbyka.ru'
 const DEFAULT_TIMEOUT_MS = 30_000
 const DEFAULT_IMAGE_MODEL = 'timm/vit_large_patch16_siglip_384.v2_webli'
@@ -140,10 +140,18 @@ const contactStatus = (profile) => ({
 
 const authenticatedMode = (profile) => ['partner', 'admin'].includes(profile.mode) && Boolean(profile.access_token)
 
+const hasScope = (profile, scope) => Array.isArray(profile.scopes) && (profile.scopes.includes('*') || profile.scopes.includes(scope))
+
+const canCreateOffer = (profile) => {
+  if (Boolean(profile.access_token) && !authenticatedMode(profile)) return true
+  return authenticatedMode(profile) && (hasScope(profile, 'partner.offers.write') || profile.capabilities?.commercial_offer_create === true)
+}
+
 const accessStatus = (profile) => ({
   mode: authenticatedMode(profile) ? profile.mode : 'public',
   authenticated: authenticatedMode(profile),
   roles: Array.isArray(profile.roles) ? profile.roles : [],
+  scopes: Array.isArray(profile.scopes) ? profile.scopes : [],
   capabilities: profile.capabilities && typeof profile.capabilities === 'object' ? profile.capabilities : {},
   profile_verified_at: profile.partner_verified_at || null
 })
@@ -188,14 +196,23 @@ const buildGuidance = (profile, { command = 'help', outcome = 'ready' } = {}) =>
   if (profile.pending_device_code) accessActions.push('auth complete')
   if (!profile.access_token) accessActions.push('contacts set')
   if (contactRegistered) accessActions.push('contacts clear')
-  const offerActions = access.authenticated
-    ? ['offer create', 'offer status', 'offer list', 'offer revise', 'offer archive']
-    : contactRegistered ? ['offer create', 'offer status'] : []
+  const offerCreateAvailable = canCreateOffer(profile)
+  const offerActions = []
+  if (offerCreateAvailable) offerActions.push('offer create')
+  if (contactRegistered) offerActions.push('offer status')
+  if (access.authenticated && hasScope(profile, 'partner.offers.read')) offerActions.push('offer status', 'offer list')
+  if (access.authenticated && hasScope(profile, 'partner.offers.write')) offerActions.push('offer revise', 'offer archive')
+  const uniqueOfferActions = [...new Set(offerActions)]
+  const offerRequirement = offerCreateAvailable
+    ? null
+    : access.authenticated
+      ? 'Для создания КП требуется scope partner.offers.write.'
+      : 'Для создания КП нужен вход через сайт или сохранённый контакт.'
   const featureGroups = [
     { id: 'catalog', available: true, summary: 'Текстовый и локальный визуальный поиск, сравнение и чтение карточек товаров.', actions: ['search', 'product', 'image-index build', 'image-index status'] },
     { id: 'design_materials', available: true, summary: 'Запрос менеджеру на чертежи, 2D-, 3D-, BIM- и другие материалы по товару.', actions: ['materials request'], requirement: 'ФИО, телефон, email и явное согласие на обработку персональных данных.' },
     { id: 'access', available: true, summary: 'Вход через сайт, проверка режима и безопасное сохранение контакта.', actions: accessActions, requirement: accessActions.includes('contacts set') ? 'Сохранение контакта требует согласия пользователя.' : null },
-    { id: 'commercial_offers', available: offerActions.length > 0, summary: 'Создание и ведение коммерческих предложений.', actions: offerActions, requirement: offerActions.length ? null : 'Вход через сайт или сохранённый контакт.' },
+    { id: 'commercial_offers', available: true, create_available: offerCreateAvailable, summary: 'Создание и ведение коммерческих предложений.', supported_actions: ['offer create', 'offer status', 'offer list', 'offer revise', 'offer archive'], actions: uniqueOfferActions, requirement: offerRequirement },
     { id: 'orders', available: access.authenticated, summary: 'Создание, просмотр, изменение и отмена своих заказов.', actions: access.authenticated ? ['order create', 'order list', 'order get', 'order update', 'order cancel'] : [], requirement: access.authenticated ? null : 'Вход через сайт Hobbyka.' },
     { id: 'admin_offers', available: access.mode === 'admin' && access.capabilities.admin_all_offers === true, summary: 'Чтение всех КП для менеджера или администратора.', actions: access.mode === 'admin' && access.capabilities.admin_all_offers === true ? ['admin offers list', 'admin offers get'] : [], requirement: access.mode === 'admin' && access.capabilities.admin_all_offers === true ? null : 'Режим admin и capability admin_all_offers.' },
     { id: 'admin_orders', available: access.mode === 'admin' && access.capabilities.admin_all_orders === true, summary: 'Чтение всех заказов для менеджера или администратора.', actions: access.mode === 'admin' && access.capabilities.admin_all_orders === true ? ['admin orders list', 'admin orders get'] : [], requirement: access.mode === 'admin' && access.capabilities.admin_all_orders === true ? null : 'Режим admin и capability admin_all_orders.' },
@@ -237,6 +254,15 @@ const requireContact = (profile, command) => {
 const requireAuthorized = (profile, command) => {
   if (!authenticatedMode(profile)) {
     throw new CliError('authorization_required', 'Войдите через сайт командой auth login.', 3, { guidance: buildGuidance(profile, { command, outcome: 'blocked' }) })
+  }
+}
+
+const requireOfferCreate = (profile) => {
+  if (authenticatedMode(profile) && !canCreateOffer(profile)) {
+    throw new CliError('insufficient_scope', 'Текущая авторизация не разрешает создавать КП. Требуется scope partner.offers.write.', 4, {
+      required_scope: 'partner.offers.write',
+      guidance: buildGuidance(profile, { command: 'offer create', outcome: 'blocked' })
+    })
   }
 }
 
@@ -344,7 +370,10 @@ const profileWithVerifiedAccess = (profile, verifiedProfile) => ({
   ...profile,
   mode: normalizedServerMode(verifiedProfile),
   roles: Array.isArray(verifiedProfile?.roles) ? verifiedProfile.roles : profile.roles,
-  capabilities: verifiedProfile?.capabilities && typeof verifiedProfile.capabilities === 'object' ? verifiedProfile.capabilities : profile.capabilities
+  scopes: Array.isArray(verifiedProfile?.scopes) ? verifiedProfile.scopes : profile.scopes,
+  capabilities: verifiedProfile?.capabilities && typeof verifiedProfile.capabilities === 'object' ? verifiedProfile.capabilities : profile.capabilities,
+  partner_verified_at: new Date().toISOString(),
+  updated_at: new Date().toISOString()
 })
 
 const replayPendingRequest = async (baseUrl, profile) => {
@@ -390,14 +419,16 @@ const buildQuery = (entries) => {
   return query.toString()
 }
 
-const parseItems = (value) => {
+const parseItems = (value, { allowVariants = false } = {}) => {
   const input = scalar(value, 'items', { required: true, max: 4000 })
   const items = input.split(',').map((entry, index) => {
-    const match = entry.trim().match(/^(\d+):(\d+(?:\.\d+)?)$/)
-    if (!match || Number(match[1]) < 1 || Number(match[2]) <= 0) {
-      throw new CliError('invalid_items', 'items должен иметь формат product_id:quantity через запятую.', 2, { index })
+    const match = entry.trim().match(/^(?:(product|variant):)?(\d+):(\d+(?:\.\d+)?)$/)
+    const type = match?.[1] || 'product'
+    if (!match || (!allowVariants && type === 'variant') || Number(match[2]) < 1 || Number(match[3]) <= 0) {
+      const format = allowVariants ? 'product_id:quantity или variant:variant_id:quantity' : 'product_id:quantity'
+      throw new CliError('invalid_items', `items должен иметь формат ${format} через запятую.`, 2, { index })
     }
-    return { product_id: Number(match[1]), quantity: Number(match[2]) }
+    return { [type === 'variant' ? 'variant_id' : 'product_id']: Number(match[2]), quantity: Number(match[3]) }
   })
   if (items.length < 1 || items.length > 100) throw new CliError('invalid_items', 'Нужно указать от 1 до 100 позиций.', 2)
   return items
@@ -428,10 +459,10 @@ const help = () => ({
     'auth status',
     'auth logout',
     'partner <login|complete|status|logout> (совместимый псевдоним auth)',
-    'offer create --items <product_id:quantity,...>',
+    'offer create --items <product_id:quantity|variant:variant_id:quantity,...>',
     'offer status --public-id <id>',
     'offer list',
-    'offer revise --public-id <id> --expected-version <n> --items <product_id:quantity,...>',
+    'offer revise --public-id <id> --expected-version <n> --items <product_id:quantity|variant:variant_id:quantity,...>',
     'offer archive --public-id <id> --expected-version <n>',
     'order create (--items <product_id:quantity,...> | --offer-public-id <id>)',
     'order list',
@@ -496,6 +527,8 @@ const main = async () => {
       const verified = await request(baseUrl, '/api/partner/v1/profile/', { token: profile.access_token })
       const verifiedProfile = serverProfile(verified)
       const currentProfile = profileWithVerifiedAccess(profile, verifiedProfile)
+      state.profiles[baseUrl] = currentProfile
+      await writeState(state)
       return {
         ok: true, command: `${command} login`,
         status: 'already_authorized',
@@ -564,6 +597,8 @@ const main = async () => {
     const verified = await request(baseUrl, '/api/partner/v1/profile/', { token: profile.access_token })
     const verifiedProfile = serverProfile(verified)
     const currentProfile = profileWithVerifiedAccess(profile, verifiedProfile)
+    state.profiles[baseUrl] = currentProfile
+    await writeState(state)
     return { ok: true, command: `${command} status`, access: accessStatus(currentProfile), profile: verifiedProfile, guidance: buildGuidance(currentProfile, { command: 'auth status' }) }
   }
 
@@ -682,7 +717,8 @@ const main = async () => {
   if (command === 'offer' && action === 'create') {
     requireContact(profile, 'offer create')
     if (!profile.access_token) throw new CliError('contact_required', 'Перед созданием КП зарегистрируйте контакт.', 3, { guidance: buildGuidance(profile, { command: 'offer create', outcome: 'blocked' }) })
-    const body = { items: parseItems(flags.items), agent: 'hobbyka-cli' }
+    requireOfferCreate(profile)
+    const body = { items: parseItems(flags.items, { allowVariants: true }), agent: 'hobbyka-cli' }
     const object = {
       name: scalar(flags['object-name'], 'object-name', { max: 500 }),
       city: scalar(flags.city, 'city', { max: 255 }),
@@ -719,7 +755,7 @@ const main = async () => {
   if (command === 'offer' && action === 'revise') {
     requireAuthorized(profile, 'offer revise')
     const publicId = publicIdentifier(flags['public-id'], 'public-id')
-    const body = { expected_version: integer(flags['expected-version'], 'expected-version'), items: parseItems(flags.items), agent: 'hobbyka-cli' }
+    const body = { expected_version: integer(flags['expected-version'], 'expected-version'), items: parseItems(flags.items, { allowVariants: true }), agent: 'hobbyka-cli' }
     const data = await request(baseUrl, `/api/partner/v1/commercial-offers/${publicId}/`, {
       method: 'PATCH', body, token: profile.access_token,
       idempotencyKey: scalar(flags['idempotency-key'], 'idempotency-key', { max: 128 }) || randomUUID()
