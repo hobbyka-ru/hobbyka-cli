@@ -1,6 +1,6 @@
 # Hobbyka CLI
 
-Официальный открытый плагин Hobbyka для ИИ-агентов, версия `0.6.0`. Агент использует компактный CLI для поиска товаров, локального сопоставления по фотографии, запроса проектных материалов, проверки серверных цен и подготовки коммерческих предложений.
+Официальный открытый плагин Hobbyka для ИИ-агентов, версия `0.6.1`. Агент использует компактный CLI для поиска товаров, локального сопоставления по фотографии, запроса проектных материалов, проверки серверных цен и подготовки коммерческих предложений.
 
 - Точка обнаружения и документация: [hobbyka.ru/ai/cli/](https://hobbyka.ru/ai/cli/).
 - Рабочий API CLI: `https://hobbyka.ru`.
@@ -55,8 +55,10 @@ node plugins/hobbyka-cli/skills/hobbyka-catalog-agent/scripts/hobbyka-cli.mjs co
 # Карточка и КП
 node plugins/hobbyka-cli/skills/hobbyka-catalog-agent/scripts/hobbyka-cli.mjs product --id 123
 node plugins/hobbyka-cli/skills/hobbyka-catalog-agent/scripts/hobbyka-cli.mjs materials request --stdin
-node plugins/hobbyka-cli/skills/hobbyka-catalog-agent/scripts/hobbyka-cli.mjs offer create --items "123:20,456:20"
+node plugins/hobbyka-cli/skills/hobbyka-catalog-agent/scripts/hobbyka-cli.mjs offer create --items "123:20,variant:654:20"
 ```
+
+В позиции КП `123:20` означает товар без выбранного варианта. Запись `variant:654:20` означает конкретный вариант, который человек выбрал по характеристикам из карточки. Родительский товар сервер определяет автоматически. Карта `guidance` сохраняет группу КП видимой и через `create_available` с `requirement` объясняет, разрешено ли создание текущей авторизации.
 
 Для `materials request --stdin` JSON содержит обязательные `product_id`, `full_name`, `phone`, `email`, `personal_data_consent: true`; `company` и `comment` необязательны. Контактные значения передаются только серверной форме и не сохраняются в состоянии CLI.
 
