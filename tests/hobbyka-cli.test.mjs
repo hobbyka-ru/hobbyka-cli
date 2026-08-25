@@ -145,7 +145,7 @@ test('Hobbyka CLI проходит контактный шлюз и создаё
     }
     if (request.url === '/api/ai/v1/commercial-offers/' && request.method === 'POST') {
       response.statusCode = 201
-      response.end(JSON.stringify({ data: { public_id: 'a'.repeat(40), status: 'ready', total: 2000, pdf_url: 'https://example.test/offer.pdf' }, meta: {} }))
+      response.end(JSON.stringify({ data: { public_id: 'a'.repeat(40), status: 'ready', total: 2000, view_url: 'https://hobbyka.ru/kp/?CODE=931ce6fdb504f0917bd47cb309bf4f49', pdf_url: 'https://example.test/offer.pdf' }, meta: {} }))
       return
     }
     if (request.url === '/api/ai/v1/material-requests/' && request.method === 'POST') {
@@ -239,9 +239,12 @@ test('Hobbyka CLI проходит контактный шлюз и создаё
 
   const offer = await run(['offer', 'create', '--items', '321:2,variant:654:1'], { env })
   assert.equal(offer.code, 0)
-  assert.equal(JSON.parse(offer.stdout).data.data.total, 2000)
-  assert.equal(JSON.parse(offer.stdout).guidance.current_state.site_authorized, false)
-  assert.equal(JSON.parse(offer.stdout).guidance.recommended_next_step.action, 'review_created_offer')
+  const offerResult = JSON.parse(offer.stdout)
+  assert.equal(offerResult.data.data.total, 2000)
+  assert.equal(offerResult.data.data.view_url, 'https://hobbyka.ru/kp/?CODE=931ce6fdb504f0917bd47cb309bf4f49')
+  assert.equal(offerResult.guidance.current_state.site_authorized, false)
+  assert.match(offerResult.guidance.recommended_next_step.explanation, /view_url.*pdf_url/)
+  assert.equal(offerResult.guidance.recommended_next_step.action, 'review_created_offer')
   const offerRequest = requests.find((entry) => entry.url === '/api/ai/v1/commercial-offers/')
   assert.equal(offerRequest.authorization, 'Bearer hka_test_token')
   assert.deepEqual(offerRequest.body.items, [{ product_id: 321, quantity: 2 }, { variant_id: 654, quantity: 1 }])
