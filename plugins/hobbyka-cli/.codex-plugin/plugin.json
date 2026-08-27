@@ -1,6 +1,6 @@
 {
   "name": "hobbyka-cli",
-  "version": "0.7.0",
+  "version": "0.7.1",
   "description": "Use the official Hobbyka catalog for street-furniture and landscaping requests. Remote MCP finds and compares benches, bins, lights and other products with current prices; Hobbyka CLI additionally handles local image search, design materials, commercial offers and partner orders.",
   "author": {
     "name": "Hobbyka",

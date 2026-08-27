@@ -40,6 +40,9 @@ if (!cli.includes(`const VERSION = '${expectedVersion}'`)) throw new Error('Ве
 if (!cli.includes('const buildGuidance =') || !cli.includes('feature_groups: featureGroups') || !cli.includes('server_capabilities: access.capabilities')) throw new Error('В CLI нет универсальной карты guidance')
 if (!cli.includes("method: 'siglip2_l'") || !cli.includes("command === 'image-index'")) throw new Error('В CLI нет локального поиска по изображению')
 
+const pluginLauncher = await readFile(path.join(pluginRoot, 'scripts/hobbyka-cli.mjs'), 'utf8')
+if (!pluginLauncher.includes("../skills/hobbyka-catalog-agent/scripts/hobbyka-cli.mjs")) throw new Error('В корне плагина нет устойчивого запуска CLI')
+
 const visit = async (directory) => {
   for (const item of await readdir(directory, { withFileTypes: true })) {
     const target = path.join(directory, item.name)

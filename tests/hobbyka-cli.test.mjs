@@ -7,6 +7,7 @@ import { tmpdir } from 'node:os'
 import path from 'node:path'
 
 const cli = new URL('../plugins/hobbyka-cli/skills/hobbyka-catalog-agent/scripts/hobbyka-cli.mjs', import.meta.url)
+const pluginCli = new URL('../plugins/hobbyka-cli/scripts/hobbyka-cli.mjs', import.meta.url)
 const packageManifest = JSON.parse(await readFile(new URL('../package.json', import.meta.url), 'utf8'))
 
 const run = (args, { env, input = '' } = {}) => new Promise((resolve, reject) => {
@@ -33,6 +34,21 @@ test('Hobbyka CLI по умолчанию использует основной 
 test('Hobbyka CLI сообщает версию текущего публичного релиза', async () => {
   const result = await run(['version'], { env: {} })
   assert.equal(result.code, 0)
+  assert.equal(JSON.parse(result.stdout).version, packageManifest.version)
+})
+
+test('установленный плагин запускает CLI из своего корня', async () => {
+  const result = await new Promise((resolve, reject) => {
+    const child = spawn(process.execPath, [pluginCli.pathname, 'version'])
+    let stdout = ''
+    let stderr = ''
+    child.stdout.setEncoding('utf8').on('data', (chunk) => { stdout += chunk })
+    child.stderr.setEncoding('utf8').on('data', (chunk) => { stderr += chunk })
+    child.on('error', reject)
+    child.on('close', (code) => resolve({ code, stdout, stderr }))
+  })
+  assert.equal(result.code, 0)
+  assert.equal(result.stderr, '')
   assert.equal(JSON.parse(result.stdout).version, packageManifest.version)
 })
 
