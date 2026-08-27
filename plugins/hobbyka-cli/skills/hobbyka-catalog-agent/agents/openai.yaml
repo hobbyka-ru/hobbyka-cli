@@ -1,4 +1,13 @@
 interface:
-  display_name: "Hobbyka Catalog"
-  short_description: "Подбор товаров и КП Hobbyka через CLI"
-  default_prompt: "Используй $hobbyka-catalog-agent, чтобы подобрать товары Hobbyka и подготовить КП."
+  display_name: "Hobbyka: благоустройство"
+  short_description: "Подбор уличной мебели и КП Hobbyka"
+  default_prompt: "Используй $hobbyka-catalog-agent, чтобы подобрать товары для благоустройства по количеству, бюджету и ценовому сегменту."
+dependencies:
+  tools:
+    - type: "mcp"
+      value: "hobbyka"
+      description: "Официальный каталог, цены, карточки и КП Hobbyka"
+      transport: "streamable_http"
+      url: "https://hobbyka.ru/mcp/hobbyka/"
+policy:
+  allow_implicit_invocation: true

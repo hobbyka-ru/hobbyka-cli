@@ -1,0 +1,8 @@
+{
+  "mcpServers": {
+    "hobbyka": {
+      "type": "http",
+      "url": "https://hobbyka.ru/mcp/hobbyka/"
+    }
+  }
+}

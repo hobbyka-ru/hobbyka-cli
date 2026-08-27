@@ -7,7 +7,7 @@ import path from 'node:path'
 import process from 'node:process'
 import { buildImageIndex, imageIndexStatus, ImageSearchError, searchImageIndex } from './image-search.mjs'
 
-const VERSION = '0.6.1'
+const VERSION = '0.7.0'
 const DEFAULT_BASE_URL = 'https://hobbyka.ru'
 const DEFAULT_TIMEOUT_MS = 30_000
 const DEFAULT_IMAGE_MODEL = 'timm/vit_large_patch16_siglip_384.v2_webli'

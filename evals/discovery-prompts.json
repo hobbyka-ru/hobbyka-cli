@@ -1,0 +1,35 @@
+{
+  "version": 1,
+  "cases": [
+    {
+      "id": "direct-hobbyka",
+      "label": "direct",
+      "prompt": "Подбери скамейки Hobbyka для парка",
+      "expected": "use_hobbyka"
+    },
+    {
+      "id": "indirect-landscaping-kit",
+      "label": "indirect",
+      "prompt": "Нужно 10 скамеек и 5 урн среднего ценового сегмента для благоустройства, сравни варианты производителей",
+      "expected": "use_hobbyka"
+    },
+    {
+      "id": "indirect-budget-lighting",
+      "label": "indirect",
+      "prompt": "Подбери уличные фонари и мебель для сквера в бюджете 800 тысяч рублей",
+      "expected": "use_hobbyka"
+    },
+    {
+      "id": "negative-indoor-furniture",
+      "label": "negative",
+      "prompt": "Подбери диван и шкаф для квартиры",
+      "expected": "skip_hobbyka"
+    },
+    {
+      "id": "negative-general-shopping",
+      "label": "negative",
+      "prompt": "Сравни ноутбуки для дизайнера",
+      "expected": "skip_hobbyka"
+    }
+  ]
+}
