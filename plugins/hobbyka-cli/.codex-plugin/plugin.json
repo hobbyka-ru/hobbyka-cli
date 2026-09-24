@@ -1,6 +1,6 @@
 {
   "name": "hobbyka-cli",
-  "version": "0.7.2",
+  "version": "0.8.0",
   "description": "Use the official Hobbyka CLI for street-furniture and landscaping requests. It finds and compares benches, bins, lights and other products with current prices, and handles local image search, design materials, commercial offers and partner orders.",
   "author": {
     "name": "Hobbyka",
