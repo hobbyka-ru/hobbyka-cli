@@ -7,7 +7,7 @@ import path from 'node:path'
 import process from 'node:process'
 import { buildImageIndex, imageIndexStatus, ImageSearchError, searchImageIndex } from './image-search.mjs'
 
-const VERSION = '0.7.2'
+const VERSION = '0.8.0'
 const DEFAULT_BASE_URL = 'https://hobbyka.ru'
 const DEFAULT_TIMEOUT_MS = 30_000
 const DEFAULT_IMAGE_MODEL = 'timm/vit_large_patch16_siglip_384.v2_webli'
@@ -141,6 +141,9 @@ const contactStatus = (profile) => ({
 const authenticatedMode = (profile) => ['partner', 'admin'].includes(profile.mode) && Boolean(profile.access_token)
 
 const hasScope = (profile, scope) => Array.isArray(profile.scopes) && (profile.scopes.includes('*') || profile.scopes.includes(scope))
+const TRICAPE_SCOPES = ['offers.admin.read', 'offers.pricing.write']
+const canUseTricape = (profile) => authenticatedMode(profile) && profile.mode === 'admin'
+  && TRICAPE_SCOPES.every((scope) => hasScope(profile, scope)) && profile.capabilities?.admin_all_offers === true
 
 const canCreateOffer = (profile) => {
   if (Boolean(profile.access_token) && !authenticatedMode(profile)) return true
@@ -169,6 +172,8 @@ const nextStepFor = (command, { authenticated, contactRegistered, outcome }) => 
     'auth login': { action: 'complete_site_authorization', explanation: 'Покажите ссылку входа и дождитесь самостоятельного подтверждения на сайте.' },
     'auth complete': { action: 'explain_authorized_access', explanation: 'Сравните повторённый запрос с публичным результатом и объясните открывшиеся функции.' },
     'offer create': { action: 'review_created_offer', explanation: 'Покажите номер, статус, итог, клиентскую ссылку view_url и PDF из pdf_url, затем предложите доступное продолжение.' },
+    'offer tricape options': { action: 'choose_tricape_presentation', explanation: 'Покажите отправителей и доступные фото каждого товара, затем согласуйте наценку и оформление.' },
+    'offer tricape create': { action: 'open_tricape_document', explanation: 'Покажите html_url: документ открывается в браузере и сохраняется в PDF через печать.' },
     'offer status': { action: 'review_offer_status', explanation: 'Покажите клиентскую ссылку view_url и PDF из pdf_url, объясните текущий статус КП и следующее доступное действие.' },
     'offer list': { action: 'choose_offer', explanation: 'Покажите список и помогите выбрать КП для просмотра, новой версии или заказа.' },
     'offer revise': { action: 'review_offer_version', explanation: 'Покажите новую версию и её связь с предыдущим КП.' },
@@ -197,6 +202,7 @@ const buildGuidance = (profile, { command = 'help', outcome = 'ready' } = {}) =>
   if (!profile.access_token) accessActions.push('contacts set')
   if (contactRegistered) accessActions.push('contacts clear')
   const offerCreateAvailable = canCreateOffer(profile)
+  const tricapeAvailable = canUseTricape(profile)
   const offerActions = []
   if (offerCreateAvailable) offerActions.push('offer create')
   if (contactRegistered) offerActions.push('offer status')
@@ -214,7 +220,7 @@ const buildGuidance = (profile, { command = 'help', outcome = 'ready' } = {}) =>
     { id: 'access', available: true, summary: 'Вход через сайт, проверка режима и безопасное сохранение контакта.', actions: accessActions, requirement: accessActions.includes('contacts set') ? 'Сохранение контакта требует согласия пользователя.' : null },
     { id: 'commercial_offers', available: true, create_available: offerCreateAvailable, summary: 'Создание и ведение коммерческих предложений.', supported_actions: ['offer create', 'offer status', 'offer list', 'offer revise', 'offer archive'], actions: uniqueOfferActions, requirement: offerRequirement },
     { id: 'orders', available: access.authenticated, summary: 'Создание, просмотр, изменение и отмена своих заказов.', actions: access.authenticated ? ['order create', 'order list', 'order get', 'order update', 'order cancel'] : [], requirement: access.authenticated ? null : 'Вход через сайт Hobbyka.' },
-    { id: 'admin_offers', available: access.mode === 'admin' && access.capabilities.admin_all_offers === true, summary: 'Чтение всех КП для менеджера или администратора.', actions: access.mode === 'admin' && access.capabilities.admin_all_offers === true ? ['admin offers list', 'admin offers get'] : [], requirement: access.mode === 'admin' && access.capabilities.admin_all_offers === true ? null : 'Режим admin и capability admin_all_offers.' },
+    { id: 'admin_offers', available: access.mode === 'admin' && access.capabilities.admin_all_offers === true, summary: 'Чтение всех КП и подготовка «Трикапэ» для менеджера или администратора.', actions: access.mode === 'admin' && access.capabilities.admin_all_offers === true ? ['admin offers list', 'admin offers get', ...(tricapeAvailable ? ['offer tricape options', 'offer tricape create'] : [])] : [], requirement: access.mode === 'admin' && access.capabilities.admin_all_offers === true ? (tricapeAvailable ? null : 'Для «Трикапэ» дополнительно нужны scopes offers.admin.read и offers.pricing.write.') : 'Режим admin и capability admin_all_offers.' },
     { id: 'admin_orders', available: access.mode === 'admin' && access.capabilities.admin_all_orders === true, summary: 'Чтение всех заказов для менеджера или администратора.', actions: access.mode === 'admin' && access.capabilities.admin_all_orders === true ? ['admin orders list', 'admin orders get'] : [], requirement: access.mode === 'admin' && access.capabilities.admin_all_orders === true ? null : 'Режим admin и capability admin_all_orders.' },
     { id: 'cli_info', available: true, summary: 'Справка, версия и текущая конфигурация CLI.', actions: ['help', 'version', 'config'] }
   ]
@@ -292,7 +298,7 @@ const recommendation = (flags) => {
     : undefined
 }
 
-const request = async (baseUrl, route, { method = 'GET', body, token, idempotencyKey } = {}) => {
+const request = async (baseUrl, route, { method = 'GET', body, token, idempotencyKey, privateInput = false } = {}) => {
   const controller = new AbortController()
   const timeoutMs = integer(process.env.HOBBYKA_TIMEOUT_MS, 'HOBBYKA_TIMEOUT_MS', { min: 1000, max: 120000, fallback: DEFAULT_TIMEOUT_MS })
   const timeout = setTimeout(() => controller.abort(), timeoutMs)
@@ -314,7 +320,7 @@ const request = async (baseUrl, route, { method = 'GET', body, token, idempotenc
       const serverError = payload?.error || payload
       throw new CliError(
         scalar(serverError?.code, 'server_error_code', { max: 128 }) || 'hobbyka_request_failed',
-        scalar(serverError?.message, 'server_error_message', { max: 1000 }) || `Hobbyka вернул HTTP ${response.status}.`,
+        privateInput ? `Hobbyka отклонил запрос КП (HTTP ${response.status}); проверьте права и настройки по коду ошибки.` : scalar(serverError?.message, 'server_error_message', { max: 1000 }) || `Hobbyka вернул HTTP ${response.status}.`,
         response.status === 401 || response.status === 403 ? 4 : 5,
         { http_status: response.status, request_id: response.headers.get('x-request-id') || undefined }
       )
@@ -464,6 +470,8 @@ const help = () => ({
     'offer list',
     'offer revise --public-id <id> --expected-version <n> --items <product_id:quantity|variant:variant_id:quantity,...>',
     'offer archive --public-id <id> --expected-version <n>',
+    'offer tricape options --id <id> — отправители и доступные фото товаров КП',
+    'offer tricape create --id <id> --stdin — HTML-документ «Трикапэ»; JSON с markup_percent, sender и photo_ids',
     'order create (--items <product_id:quantity,...> | --offer-public-id <id>)',
     'order list',
     'order get --public-id <id>',
@@ -712,6 +720,48 @@ const main = async () => {
       idempotencyKey: scalar(flags['idempotency-key'] || input.idempotency_key, 'idempotency-key', { max: 128 }) || randomUUID()
     })
     return { ok: true, command: 'materials request', data, guidance: buildGuidance(profile, { command: 'materials request' }) }
+  }
+
+  if (command === 'offer' && action === 'tricape') {
+    const operation = positionals[2]
+    const allowedFlags = operation === 'options' ? ['id', 'base-url'] : ['id', 'stdin', 'base-url']
+    if (!['options', 'create'].includes(operation) || positionals.length !== 3 || Object.keys(flags).some((flag) => !allowedFlags.includes(flag))) {
+      throw new CliError('invalid_argument', 'Используйте offer tricape options --id ID либо offer tricape create --id ID --stdin.', 2)
+    }
+    if (typeof flags.id !== 'string') throw new CliError('invalid_argument', 'Укажите числовой --id КП.', 2)
+    const id = integer(flags.id, 'id')
+    if (operation === 'create' && flags.stdin !== true) throw new CliError('stdin_required', 'Передайте параметры «Трикапэ» как JSON через stdin.', 2)
+    const offerCommand = `offer tricape ${operation}`
+    requireAuthorized(profile, offerCommand)
+    const verified = serverProfile(await request(baseUrl, '/api/partner/v1/profile/', { token: profile.access_token }))
+    const currentProfile = profileWithVerifiedAccess(profile, { ...verified, scopes: verified?.scopes || [], capabilities: verified?.capabilities || {} })
+    state.profiles[baseUrl] = currentProfile
+    await writeState(state)
+    requireAdmin(currentProfile, offerCommand)
+    if (!canUseTricape(currentProfile)) {
+      throw new CliError('insufficient_scope', 'Для «Трикапэ» нужны чтение КП, изменение цен и включённый административный контур. После обновления прав повторно войдите через сайт.', 4, { required_scopes: TRICAPE_SCOPES, guidance: buildGuidance(currentProfile, { command: offerCommand, outcome: 'blocked' }) })
+    }
+    const route = `/api/internal/v1/commercial-offers/${id}/tricape${operation === 'options' ? '-options' : ''}/`
+    if (operation === 'options') {
+      const data = await request(baseUrl, route, { token: currentProfile.access_token })
+      return { ok: true, command: offerCommand, data, guidance: buildGuidance(currentProfile, { command: offerCommand }) }
+    }
+    const input = await readStdinJson()
+    if (Object.keys(input).some((field) => !['markup_percent', 'sender', 'photo_ids'].includes(field))) {
+      throw new CliError('invalid_argument', 'Неизвестное поле параметров «Трикапэ».', 2)
+    }
+    if (typeof input.markup_percent !== 'number' || !Number.isFinite(input.markup_percent) || input.markup_percent < 0 || input.markup_percent > 1000) {
+      throw new CliError('invalid_argument', 'markup_percent должен быть числом от 0 до 1000.', 2)
+    }
+    if (!['ip_norman', 'ooo_blago'].includes(input.sender)) throw new CliError('invalid_argument', 'Выберите отправителя из offer tricape options.', 2)
+    const photoIds = input.photo_ids ?? []
+    if (!Array.isArray(photoIds) || photoIds.some((value) => value !== null && (!Number.isInteger(value) || value <= 0))) {
+      throw new CliError('invalid_argument', 'photo_ids должен содержать ID фото или null по порядку товаров.', 2)
+    }
+    const result = await request(baseUrl, route, { method: 'POST', body: { markup_percent: input.markup_percent, sender: input.sender, photo_ids: photoIds, agent: 'hobbyka-cli' }, token: currentProfile.access_token, privateInput: true })
+    const document = serverProfile(result)
+    const data = Object.fromEntries(['id', 'number', 'html_url'].filter((key) => document?.[key] !== undefined).map((key) => [key, document[key]]))
+    return { ok: true, command: offerCommand, data: { data }, guidance: buildGuidance(currentProfile, { command: offerCommand }) }
   }
 
   if (command === 'offer' && action === 'create') {

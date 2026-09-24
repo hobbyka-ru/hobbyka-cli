@@ -1,7 +1,7 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
 import { spawn } from 'node:child_process'
-import { chmod, mkdtemp, readFile, stat, writeFile } from 'node:fs/promises'
+import { chmod, mkdtemp, readFile, rm, stat, writeFile } from 'node:fs/promises'
 import { createServer } from 'node:http'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
@@ -421,4 +421,58 @@ test('единая авторизация назначает администр�
   assert.equal(JSON.parse((await run(['admin', 'orders', 'list'], { env })).stdout).data.data.items[0].id, 77)
   assert.equal(JSON.parse((await run(['admin', 'orders', 'get', '--id', '77'], { env })).stdout).data.data.items[0].product_id, 321)
   assert.equal(requests.filter((entry) => entry.url?.startsWith('/api/internal/v1/')).every((entry) => entry.authorization === 'Bearer hka_admin_secret'), true)
+})
+
+test('Трикапэ показывает фото КП и создаёт документ только с текущими правами менеджера', async (t) => {
+  const requests = []
+  const id = 321
+  const allowedProfile = { mode: 'admin', roles: ['manager'], scopes: ['offers.admin.read', 'offers.pricing.write'], capabilities: { admin_all_offers: true } }
+  let currentProfile = allowedProfile
+  const server = createServer(async (request, response) => {
+    const chunks = []
+    for await (const chunk of request) chunks.push(chunk)
+    requests.push({ method: request.method, url: request.url, authorization: request.headers.authorization, body: chunks.length ? JSON.parse(Buffer.concat(chunks).toString('utf8')) : null })
+    response.setHeader('Content-Type', 'application/json')
+    if (request.url === '/api/partner/v1/profile/') return response.end(JSON.stringify({ data: currentProfile }))
+    if (request.url === `/api/internal/v1/commercial-offers/${id}/tricape-options/`) {
+      return response.end(JSON.stringify({ data: { id, number: 'КП-321', senders: { ip_norman: 'ИП Норман' }, items: [{ name: 'Скамья', photos: [{ id: 42, name: 'Фото', url: 'https://example.test/photo.jpg' }] }] } }))
+    }
+    if (request.url === `/api/internal/v1/commercial-offers/${id}/tricape/`) {
+      response.statusCode = 201
+      return response.end(JSON.stringify({ data: { id, number: 'КП-321', html_url: 'https://example.test/upload/tmp/tricape/document.html', private_client: 'Скрытый контакт' } }))
+    }
+    response.statusCode = 404
+    response.end('{}')
+  })
+  await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve))
+  t.after(() => new Promise((resolve) => server.close(resolve)))
+  const directory = await mkdtemp(path.join(tmpdir(), 'hobbyka-cli-tricape-'))
+  t.after(() => rm(directory, { recursive: true, force: true }))
+  const baseUrl = `http://127.0.0.1:${server.address().port}`
+  const statePath = path.join(directory, 'state.json')
+  const env = { HOBBYKA_BASE_URL: baseUrl, HOBBYKA_STATE_FILE: statePath }
+  const saveProfile = async () => writeFile(statePath, JSON.stringify({ version: 1, profiles: { [baseUrl]: { first_request_completed: true, access_token: 'hka_tricape_secret', ...allowedProfile } } }))
+  await saveProfile()
+
+  const options = await run(['offer', 'tricape', 'options', '--id', String(id)], { env })
+  assert.equal(options.code, 0, options.stderr)
+  assert.equal(JSON.parse(options.stdout).data.data.items[0].photos[0].id, 42)
+  assert.deepEqual(requests.map(({ method, url }) => [method, url]), [['GET', '/api/partner/v1/profile/'], ['GET', `/api/internal/v1/commercial-offers/${id}/tricape-options/`]])
+
+  const input = { markup_percent: 12.5, sender: 'ip_norman', photo_ids: [42, null] }
+  const created = await run(['offer', 'tricape', 'create', '--id', String(id), '--stdin'], { env, input: JSON.stringify(input) })
+  assert.equal(created.code, 0, created.stderr)
+  assert.deepEqual(JSON.parse(created.stdout).data.data, { id, number: 'КП-321', html_url: 'https://example.test/upload/tmp/tricape/document.html' })
+  assert.equal(created.stdout.includes('Скрытый контакт'), false)
+  assert.deepEqual(requests.at(-1), { method: 'POST', url: `/api/internal/v1/commercial-offers/${id}/tricape/`, authorization: 'Bearer hka_tricape_secret', body: { ...input, agent: 'hobbyka-cli' } })
+  assert.equal((await readFile(statePath, 'utf8')).includes('Скрытый контакт'), false)
+
+  for (const input of [{ ...allowedProfile, scopes: ['offers.admin.read'] }, { ...allowedProfile, capabilities: {} }, { ...allowedProfile, mode: 'partner', roles: ['partner'] }]) {
+    await saveProfile()
+    currentProfile = input
+    const before = requests.length
+    const blocked = await run(['offer', 'tricape', 'create', '--id', String(id), '--stdin'], { env, input: JSON.stringify({ markup_percent: 5, sender: 'ip_norman' }) })
+    assert.equal(blocked.code, 4)
+    assert.deepEqual(requests.slice(before).map(({ method }) => method), ['GET'])
+  }
 })
