@@ -52,6 +52,43 @@ test('установленный плагин запускает CLI из сво
   assert.equal(JSON.parse(result.stdout).version, packageManifest.version)
 })
 
+test('текстовый поиск и карточка сохраняют производственные статусы каталога', async (t) => {
+  const items = [
+    { id: 1, production_status: { code: 'ROBOT', label: 'Роботы: быстро и много', minimum_quantity: 1 } },
+    { id: 2, production_status: { code: 'LABOR_INTENSIVE', label: 'Трудоёмко - закажи заранее', minimum_quantity: 1 } },
+    { id: 3, production_status: { code: 'PREORDER', label: 'Предзаказ - очередь на изготовление', minimum_quantity: 1 } },
+    { id: 4, production_status: { code: 'MIN_10', label: 'Заказ от 10 шт.', minimum_quantity: 10 } },
+    { id: 5, production_status: null },
+    { id: 6 }
+  ]
+  const server = createServer((request, response) => {
+    const match = new URL(request.url, 'http://localhost').pathname.match(/^\/api\/ai\/v1\/catalog\/products\/(\d+\/)?$/)
+    const data = match && (match[1] ? items.find((item) => item.id === parseInt(match[1], 10)) : { items })
+    response.setHeader('Content-Type', 'application/json')
+    response.statusCode = data ? 200 : 404
+    response.end(JSON.stringify({ data, meta: {} }))
+  })
+  await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve))
+  t.after(() => server.close())
+
+  const directory = await mkdtemp(path.join(tmpdir(), 'hobbyka-cli-production-'))
+  t.after(() => rm(directory, { recursive: true, force: true }))
+  const env = {
+    HOBBYKA_BASE_URL: `http://127.0.0.1:${server.address().port}`,
+    HOBBYKA_STATE_FILE: path.join(directory, 'state.json')
+  }
+
+  const search = await run(['search', '--query', 'скамейка'], { env })
+  assert.equal(search.code, 0, search.stderr)
+  assert.deepEqual(JSON.parse(search.stdout).data.data.items, items)
+
+  for (const item of items) {
+    const product = await run(['product', '--id', String(item.id)], { env })
+    assert.equal(product.code, 0, product.stderr)
+    assert.deepEqual(JSON.parse(product.stdout).data.data, item)
+  }
+})
+
 test('локальный SigLIP2-L-поиск строит индекс, возвращает полную карточку и не отправляет фотографию', async (t) => {
   const requests = []
   const server = createServer((request, response) => {
